@@ -10,9 +10,9 @@ use vk_video::{EncodedInputChunk, VulkanDevice, VulkanInstance, parameters::Deco
 use wgpu::{
     BindGroup, BindGroupLayout, Color, CommandEncoderDescriptor, CompositeAlphaMode, Device,
     Features, FilterMode, FragmentState, FrontFace, Limits, LoadOp, MultisampleState, Operations,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode,
-    PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState,
+    PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Surface, SurfaceConfiguration,
     SurfaceError, Texture, TextureAspect, TextureFormat, TextureSampleType, TextureUsages,
     TextureViewDescriptor, TextureViewDimension, VertexState,
@@ -306,7 +306,8 @@ impl PlayerState {
             .create_wgpu_textures_decoder(DecoderParameters::default())
             .map_err(|err| format!("failed to create decoder: {err}"))?;
 
-        let input = File::open(VIDEO_PATH).map_err(|err| format!("failed to open {VIDEO_PATH}: {err}"))?;
+        let input =
+            File::open(VIDEO_PATH).map_err(|err| format!("failed to open {VIDEO_PATH}: {err}"))?;
 
         Ok(Self {
             _instance: instance,
@@ -412,12 +413,12 @@ impl PlayerState {
         let view = surface_frame
             .texture
             .create_view(&TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .wgpu_device()
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("video-render-encoder"),
-            });
+        let mut encoder =
+            self.device
+                .wgpu_device()
+                .create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("video-render-encoder"),
+                });
 
         if let Some(texture) = self.current_texture.as_ref() {
             let bind_group = self
@@ -480,7 +481,10 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(Window::default_attributes().with_title("vk-video player (25fps, zero-copy)"))
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("vk-video player (25fps, zero-copy)"),
+                    )
                     .expect("failed to create window"),
             );
 
