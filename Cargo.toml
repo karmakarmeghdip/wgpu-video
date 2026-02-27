@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-vk-video = "0.2.0"
 wgpu = "28.0.0"
 winit = "0.30.12"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = "0.62.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libva = { package = "cros-libva", path = "third_party/cros-libva/lib" }
