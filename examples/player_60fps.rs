@@ -1,22 +1,19 @@
 use std::{
-    collections::VecDeque,
     fs::File,
-    io::Read,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use vk_video::{EncodedInputChunk, VulkanDevice, VulkanInstance, parameters::DecoderParameters};
 use wgpu::{
-    BindGroup, BindGroupLayout, Color, CommandEncoderDescriptor, CompositeAlphaMode, Device,
-    Features, FilterMode, FragmentState, FrontFace, Limits, LoadOp, MultisampleState, Operations,
+    BindGroupLayout, Color, CommandEncoderDescriptor, CompositeAlphaMode, Device, Features,
+    FilterMode, FragmentState, FrontFace, Limits, LoadOp, MultisampleState, Operations,
     PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState,
     PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Surface, SurfaceConfiguration,
-    SurfaceError, Texture, TextureAspect, TextureFormat, TextureSampleType, TextureUsages,
-    TextureViewDescriptor, TextureViewDimension, VertexState,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, StoreOp, Surface, SurfaceConfiguration, SurfaceError, TextureFormat,
+    TextureSampleType, TextureUsages, TextureViewDimension, VertexState,
 };
+use wgpu_video::{PlayerConfig, VideoPlayer};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -25,16 +22,13 @@ use winit::{
 };
 
 const VIDEO_PATH: &str = "examples/asset/output.h264";
-const TICK_25FPS: Duration = Duration::from_millis(40);
+const TICK_60FPS: Duration = Duration::from_nanos(16_666_667);
 
 const VIDEO_SHADER: &str = r#"
 @group(0) @binding(0)
-var y_tex: texture_2d<f32>;
+var video_tex: texture_2d<f32>;
 
 @group(0) @binding(1)
-var uv_tex: texture_2d<f32>;
-
-@group(0) @binding(2)
 var video_sampler: sampler;
 
 struct VSOut {
@@ -56,15 +50,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VSOut {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let y = textureSample(y_tex, video_sampler, in.uv).r;
-    let uv = textureSample(uv_tex, video_sampler, in.uv).rg - vec2<f32>(0.5, 0.5);
-
-    // NV12 (YCbCr) to RGB conversion.
-    let r = y + 1.402 * uv.y;
-    let g = y - 0.344136 * uv.x - 0.714136 * uv.y;
-    let b = y + 1.772 * uv.x;
-
-    return vec4<f32>(r, g, b, 1.0);
+    return textureSample(video_tex, video_sampler, in.uv);
 }
 "#;
 
@@ -91,16 +77,6 @@ impl VideoRenderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
                     visibility: ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
@@ -166,111 +142,45 @@ impl VideoRenderer {
             sampler,
         }
     }
-
-    fn bind_group_for_texture(&self, device: &Device, texture: &Texture) -> BindGroup {
-        let y_view = texture.create_view(&TextureViewDescriptor {
-            label: Some("video-y-plane"),
-            format: Some(TextureFormat::R8Unorm),
-            dimension: Some(TextureViewDimension::D2),
-            usage: Some(TextureUsages::TEXTURE_BINDING),
-            aspect: TextureAspect::Plane0,
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: Some(1),
-        });
-
-        let uv_view = texture.create_view(&TextureViewDescriptor {
-            label: Some("video-uv-plane"),
-            format: Some(TextureFormat::Rg8Unorm),
-            dimension: Some(TextureViewDimension::D2),
-            usage: Some(TextureUsages::TEXTURE_BINDING),
-            aspect: TextureAspect::Plane1,
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: Some(1),
-        });
-
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("video-bind-group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&y_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&uv_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        })
-    }
 }
 
 struct PlayerState {
-    _instance: Arc<VulkanInstance>,
     _window: Arc<Window>,
     surface: Surface<'static>,
     surface_config: SurfaceConfiguration,
-    device: Arc<VulkanDevice>,
-    queue: Queue,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
     renderer: VideoRenderer,
-    decoder: vk_video::WgpuTexturesDecoder,
-    input: File,
-    read_buffer: Vec<u8>,
-    decoded_queue: VecDeque<Texture>,
-    current_texture: Option<Texture>,
-    stream_done: bool,
-    last_present: Instant,
+    player: VideoPlayer,
+    last_tick: Instant,
+    accumulator: Duration,
 }
 
 impl PlayerState {
     fn new(window: Arc<Window>) -> Result<Self, String> {
-        let instance = VulkanInstance::new().map_err(|err| format!("vulkan init failed: {err}"))?;
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance
-            .wgpu_instance()
             .create_surface(window.clone())
             .map_err(|err| format!("surface creation failed: {err}"))?;
 
-        let compatible_decode_adapter = instance
-            .iter_adapters(Some(&surface))
-            .map_err(|err| format!("failed to enumerate adapters: {err}"))?
-            .find(|adapter| adapter.supports_decoding());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
+        .map_err(|err| format!("adapter request failed: {err}"))?;
 
-        let adapter = if let Some(adapter) = compatible_decode_adapter {
-            adapter
-        } else {
-            let decode_only_names = instance
-                .iter_adapters(None)
-                .map_err(|err| format!("failed to enumerate all adapters: {err}"))?
-                .filter(|adapter| adapter.supports_decoding())
-                .map(|adapter| adapter.info().name.clone())
-                .collect::<Vec<_>>();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("wgpu-video-example-device"),
+            required_features: Features::empty(),
+            required_limits: Limits::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        }))
+        .map_err(|err| format!("device request failed: {err}"))?;
 
-            if decode_only_names.is_empty() {
-                return Err("no Vulkan video decode-capable adapter found".to_owned());
-            }
-
-            return Err(format!(
-                "no adapter supports both presentation and Vulkan decode (zero-copy impossible on this setup). Decode-capable adapters: {decode_only_names:?}"
-            ));
-        };
-
-        let device = adapter
-            .create_device(
-                Features::empty(),
-                wgpu::ExperimentalFeatures::disabled(),
-                Limits::default(),
-            )
-            .map_err(|err| format!("failed to create device: {err}"))?;
-
-        let caps = surface.get_capabilities(&device.wgpu_adapter());
+        let caps = surface.get_capabilities(&adapter);
         let surface_format = caps
             .formats
             .iter()
@@ -299,31 +209,37 @@ impl PlayerState {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        surface.configure(&device.wgpu_device(), &surface_config);
+        surface.configure(&device, &surface_config);
 
-        let renderer = VideoRenderer::new(&device.wgpu_device(), surface_format);
-        let decoder = device
-            .create_wgpu_textures_decoder(DecoderParameters::default())
-            .map_err(|err| format!("failed to create decoder: {err}"))?;
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let renderer = VideoRenderer::new(&device, surface_format);
 
-        let input =
-            File::open(VIDEO_PATH).map_err(|err| format!("failed to open {VIDEO_PATH}: {err}"))?;
+        let source = Box::new(
+            File::open(VIDEO_PATH).map_err(|err| format!("failed to open {VIDEO_PATH}: {err}"))?,
+        );
+
+        let player = VideoPlayer::new(
+            device.clone(),
+            queue.clone(),
+            source,
+            PlayerConfig {
+                target_format: surface_format,
+                autoplay: true,
+                loop_playback: true,
+            },
+        );
 
         Ok(Self {
-            _instance: instance,
             _window: window,
             surface,
             surface_config,
-            queue: device.wgpu_queue(),
-            renderer,
-            decoder,
             device,
-            input,
-            read_buffer: vec![0u8; 4096],
-            decoded_queue: VecDeque::new(),
-            current_texture: None,
-            stream_done: false,
-            last_present: Instant::now(),
+            queue,
+            renderer,
+            player,
+            last_tick: Instant::now(),
+            accumulator: Duration::ZERO,
         })
     }
 
@@ -333,59 +249,19 @@ impl PlayerState {
         }
         self.surface_config.width = width;
         self.surface_config.height = height;
-        self.surface
-            .configure(&self.device.wgpu_device(), &self.surface_config);
+        self.surface.configure(&self.device, &self.surface_config);
     }
 
-    fn decode_until_frame_available(&mut self) -> Result<(), String> {
-        if !self.decoded_queue.is_empty() || self.stream_done {
-            return Ok(());
-        }
+    fn tick_60fps(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        self.accumulator += now.saturating_duration_since(self.last_tick);
+        self.last_tick = now;
 
-        while self.decoded_queue.is_empty() && !self.stream_done {
-            let n = self
-                .input
-                .read(&mut self.read_buffer)
-                .map_err(|err| format!("failed to read bitstream: {err}"))?;
-
-            if n == 0 {
-                self.stream_done = true;
-                let drained = self
-                    .decoder
-                    .flush()
-                    .map_err(|err| format!("decoder flush failed: {err}"))?;
-                for frame in drained {
-                    self.decoded_queue.push_back(frame.data);
-                }
-                break;
-            }
-
-            let decoded = self
-                .decoder
-                .decode(EncodedInputChunk {
-                    data: &self.read_buffer[..n],
-                    pts: None,
-                })
-                .map_err(|err| format!("decode failed: {err}"))?;
-
-            for frame in decoded {
-                self.decoded_queue.push_back(frame.data);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn tick_frame(&mut self) -> Result<(), String> {
-        if self.last_present.elapsed() < TICK_25FPS {
-            return Ok(());
-        }
-
-        self.last_present = Instant::now();
-        self.decode_until_frame_available()?;
-
-        if let Some(next) = self.decoded_queue.pop_front() {
-            self.current_texture = Some(next);
+        while self.accumulator >= TICK_60FPS {
+            self.player
+                .tick(TICK_60FPS)
+                .map_err(|err| format!("player tick failed: {err:?}"))?;
+            self.accumulator -= TICK_60FPS;
         }
 
         Ok(())
@@ -395,8 +271,7 @@ impl PlayerState {
         let surface_frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(SurfaceError::Lost | SurfaceError::Outdated) => {
-                self.surface
-                    .configure(&self.device.wgpu_device(), &self.surface_config);
+                self.surface.configure(&self.device, &self.surface_config);
                 return Ok(());
             }
             Err(SurfaceError::Timeout) => {
@@ -412,18 +287,29 @@ impl PlayerState {
 
         let view = surface_frame
             .texture
-            .create_view(&TextureViewDescriptor::default());
-        let mut encoder =
-            self.device
-                .wgpu_device()
-                .create_command_encoder(&CommandEncoderDescriptor {
-                    label: Some("video-render-encoder"),
-                });
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        if let Some(texture) = self.current_texture.as_ref() {
-            let bind_group = self
-                .renderer
-                .bind_group_for_texture(&self.device.wgpu_device(), texture);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("video-render-encoder"),
+            });
+
+        if let Some(video_view) = self.player.texture_view() {
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("video-bind-group"),
+                layout: &self.renderer.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(video_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.renderer.sampler),
+                    },
+                ],
+            });
 
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("video-render-pass"),
@@ -483,7 +369,8 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("vk-video player (25fps, zero-copy)"),
+                            .with_title("wgpu-video player (60fps)")
+                            .with_resizable(true),
                     )
                     .expect("failed to create window"),
             );
@@ -518,7 +405,7 @@ impl ApplicationHandler for App {
                 player.resize(size.width, size.height);
             }
             WindowEvent::RedrawRequested => {
-                if let Err(err) = player.tick_frame().and_then(|_| player.render()) {
+                if let Err(err) = player.tick_60fps().and_then(|_| player.render()) {
                     eprintln!("render loop failed: {err}");
                     event_loop.exit();
                 }
