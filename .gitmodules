@@ -1,3 +1,6 @@
 [submodule "third_party/cros-libva"]
 	path = third_party/cros-libva
 	url = https://github.com/karmakarmeghdip/cros-libva
+[submodule "third_party/cros-codecs"]
+	path = third_party/cros-codecs
+	url = https://github.com/karmakarmeghdip/cros-codecs

@@ -4,6 +4,7 @@ use std::time::Duration;
 use wgpu;
 
 mod backend;
+pub mod demuxer;
 
 pub struct VideoPlayer {
     device: Arc<wgpu::Device>,
@@ -29,8 +30,8 @@ pub enum PlayerError {
 
 impl VideoPlayer {
     /// Initializes the hardware decoder and WGPU interop pipeline.
-    /// 
-    /// Takes `Arc<wgpu::Device>` and `Arc<wgpu::Queue>` directly from the 
+    ///
+    /// Takes `Arc<wgpu::Device>` and `Arc<wgpu::Queue>` directly from the
     /// UI framework's existing WGPU context.
     pub fn new(
         device: Arc<wgpu::Device>,
@@ -47,9 +48,9 @@ impl VideoPlayer {
     }
 
     /// Advances the video stream based on the system clock or delta time.
-    /// 
-    /// This should be called every frame in the UI's update loop. 
-    /// Internally, this pulls the next frame from MF/VA-API, imports the 
+    ///
+    /// This should be called every frame in the UI's update loop.
+    /// Internally, this pulls the next frame from MF/VA-API, imports the
     /// DMA-BUF/DXGI handle, and runs the YUV->RGB compute shader.
     pub fn tick(&mut self, delta: Duration) -> Result<(), PlayerError> {
         // Implementation details...
@@ -57,7 +58,7 @@ impl VideoPlayer {
     }
 
     /// Returns the converted, ready-to-render RGBA texture view.
-    /// 
+    ///
     /// In `egui`, you register this view to get a `TextureId`.
     /// In `iced`, you can wrap this in a custom widget.
     pub fn texture_view(&self) -> Option<&wgpu::TextureView> {
@@ -72,12 +73,20 @@ impl VideoPlayer {
     }
 
     // --- Standard Playback Controls ---
-    
+
     pub fn play(&mut self) {}
     pub fn pause(&mut self) {}
-    pub fn is_playing(&self) -> bool { todo!() }
-    
-    pub fn duration(&self) -> Duration { todo!() }
-    pub fn position(&self) -> Duration { todo!() }
-    pub fn seek(&mut self, target: Duration) { todo!() }
+    pub fn is_playing(&self) -> bool {
+        todo!()
+    }
+
+    pub fn duration(&self) -> Duration {
+        todo!()
+    }
+    pub fn position(&self) -> Duration {
+        todo!()
+    }
+    pub fn seek(&mut self, target: Duration) {
+        todo!()
+    }
 }
