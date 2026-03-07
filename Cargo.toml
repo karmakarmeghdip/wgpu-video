@@ -16,3 +16,6 @@ windows = "0.62.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 libva = { package = "cros-libva", path = "third_party/cros-libva/lib" }
 codecs = { package = "cros-codecs", path = "third_party/cros-codecs", features = ["vaapi"] }
+ash = "0.38.0"
+crossbeam-channel = "0.5.15"
+libloading = "0.8.9"
