@@ -3,7 +3,7 @@ fn main() -> anyhow::Result<()> {
     use std::env;
     use std::path::Path;
 
-    use wgpu_video::demuxer::Demuxer;
+    use wgpu_video::demuxer::{Demuxer, VideoCodec};
     use wgpu_video::VaapiBackend;
 
     let input = env::args()
@@ -11,9 +11,14 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "examples/asset/test.mp4".to_owned());
 
     let mut demuxer = Demuxer::new(Path::new(&input))?;
-    let track_id = demuxer.find_h264_track()?;
+    let track_id = demuxer.find_video_track()?;
     let mut backend = VaapiBackend::new()?;
-    let report = backend.decode_h264_mp4_track(&mut demuxer, track_id, 8)?;
+    let report = match demuxer.get_track_info(track_id)? {
+        VideoCodec::H264 => backend.decode_h264_mp4_track(&mut demuxer, track_id, 8)?,
+        VideoCodec::Vp8 | VideoCodec::Vp9 | VideoCodec::Av1 => {
+            backend.decode_video_track_with_prime_frames(&mut demuxer, track_id, |_frame| Ok(()))?
+        }
+    };
 
     println!(
         "decoded {} frames from track {} (timescale={})",

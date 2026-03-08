@@ -3,12 +3,12 @@ mod app {
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
+    use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
     use wgpu::{
         BindGroup, BindGroupLayout, Color, ColorTargetState, CommandEncoderDescriptor,
         CompositeAlphaMode, Device, DeviceDescriptor, Features, FilterMode, FragmentState,
@@ -17,13 +17,13 @@ mod app {
         PresentMode, PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment,
         RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
         Sampler, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource,
-        ShaderStages, StoreOp, Surface, SurfaceConfiguration, SurfaceError, Texture,
-        TextureAspect, TextureFormat, TextureSampleType, TextureUsages, TextureViewDimension,
-        TextureViewDescriptor, VertexState,
+        ShaderStages, StoreOp, Surface, SurfaceConfiguration, SurfaceError, Texture, TextureAspect,
+        TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
+        TextureViewDimension, VertexState,
     };
     use wgpu_video::{
-        ImportedPlaneFrame, PrimeDmabufFrame, VaapiBackend, VaapiVulkanFrameImporter,
-        demuxer::Demuxer,
+        demuxer::Demuxer, ImportedPlaneFrame, PrimeDmabufFrame, VaapiBackend,
+        VaapiVulkanFrameImporter,
     };
     use winit::{
         application::ApplicationHandler,
@@ -88,37 +88,38 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     impl VideoRenderer {
         fn new(device: &Device, surface_format: TextureFormat) -> Self {
-            let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("vaapi-video-bind-group-layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: TextureSampleType::Float { filterable: true },
-                            view_dimension: TextureViewDimension::D2,
-                            multisampled: false,
+            let bind_group_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("vaapi-video-bind-group-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: TextureSampleType::Float { filterable: true },
+                                view_dimension: TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: TextureSampleType::Float { filterable: true },
-                            view_dimension: TextureViewDimension::D2,
-                            multisampled: false,
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: TextureSampleType::Float { filterable: true },
+                                view_dimension: TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
 
             let sampler = device.create_sampler(&SamplerDescriptor {
                 label: Some("vaapi-video-sampler"),
@@ -180,8 +181,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
 
         fn bind_group_for_frame(&self, device: &Device, frame: &UploadedFrame) -> BindGroup {
-            let y_view = frame.y_texture.create_view(&TextureViewDescriptor::default());
-            let uv_view = frame.uv_texture.create_view(&TextureViewDescriptor::default());
+            let y_view = frame
+                .y_texture
+                .create_view(&TextureViewDescriptor::default());
+            let uv_view = frame
+                .uv_texture
+                .create_view(&TextureViewDescriptor::default());
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vaapi-video-bind-group"),
                 layout: &self.bind_group_layout,
@@ -277,7 +282,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                         TextureFormat::Bgra8Unorm | TextureFormat::Rgba8Unorm
                     )
                 })
-                .or_else(|| caps.formats.iter().copied().find(|format| !format.is_srgb()))
+                .or_else(|| {
+                    caps.formats
+                        .iter()
+                        .copied()
+                        .find(|format| !format.is_srgb())
+                })
                 .or_else(|| caps.formats.first().copied())
                 .ok_or_else(|| "surface reports no supported formats".to_owned())?;
 
@@ -380,7 +390,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 Err(SurfaceError::Timeout) => return Ok(RenderOutcome::Continue),
                 Err(err) => return Err(format!("failed to acquire swapchain texture: {err}")),
             };
-            let view = surface_texture.texture.create_view(&TextureViewDescriptor::default());
+            let view = surface_texture
+                .texture
+                .create_view(&TextureViewDescriptor::default());
             let mut encoder = self
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor {
@@ -440,9 +452,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
     }
 
-    fn spawn_decoder_thread(path: &str) -> anyhow::Result<(Receiver<PrimeDmabufFrame>, PlaybackTiming)> {
+    fn spawn_decoder_thread(
+        path: &str,
+    ) -> anyhow::Result<(Receiver<PrimeDmabufFrame>, PlaybackTiming)> {
         let mut demuxer = Demuxer::new(Path::new(path))?;
-        let track_id = demuxer.find_h264_track()?;
+        let track_id = demuxer.find_video_track()?;
         let playback_timing = analyze_track_timing(&mut demuxer, track_id)?;
 
         let (tx, rx) = bounded(2);
@@ -464,11 +478,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         frame_interval: Duration,
     ) -> anyhow::Result<()> {
         let mut demuxer = Demuxer::new(Path::new(path))?;
-        let track_id = demuxer.find_h264_track()?;
+        let track_id = demuxer.find_video_track()?;
         let mut backend = VaapiBackend::new()?;
         let mut playback_start = None;
         let mut frame_index = 0u64;
-        backend.decode_h264_mp4_track_with_prime_frames(&mut demuxer, track_id, |frame| {
+        backend.decode_video_track_with_prime_frames(&mut demuxer, track_id, |frame| {
             let start_instant = *playback_start.get_or_insert_with(Instant::now);
             let target_offset = frame_interval.saturating_mul(frame_index as u32);
             let target_time = start_instant + target_offset;
@@ -486,8 +500,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         Ok(())
     }
 
-    fn analyze_track_timing(demuxer: &mut Demuxer, track_id: u32) -> anyhow::Result<PlaybackTiming> {
-        let timescale = demuxer.get_h264_track_config(track_id)?.timescale.max(1);
+    fn analyze_track_timing(
+        demuxer: &mut Demuxer,
+        track_id: u32,
+    ) -> anyhow::Result<PlaybackTiming> {
+        let timescale = demuxer.get_track_config(track_id)?.timescale.max(1);
         let sample_count = demuxer.sample_count(track_id)?;
         let mut previous_start_time = None;
         let mut first_start_time = None;
@@ -517,9 +534,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
         let frame_interval = timestamp_delta_to_duration(nominal_delta, timescale);
         let expected_duration = match (first_start_time, last_start_time) {
-            (Some(first), Some(last)) => {
-                timestamp_delta_to_duration(last.saturating_sub(first).saturating_add(nominal_delta), timescale)
-            }
+            (Some(first), Some(last)) => timestamp_delta_to_duration(
+                last.saturating_sub(first).saturating_add(nominal_delta),
+                timescale,
+            ),
             _ => frame_interval,
         };
 
@@ -551,14 +569,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         loop {
             match tx.try_send(pending.take().expect("frame should be present")) {
                 Ok(()) => return true,
-                Err(TrySendError::Full(frame)) => {
-                    match drop_rx.try_recv() {
-                        Ok(_) | Err(TryRecvError::Empty) => {
-                            pending = Some(frame);
-                        }
-                        Err(TryRecvError::Disconnected) => return false,
+                Err(TrySendError::Full(frame)) => match drop_rx.try_recv() {
+                    Ok(_) | Err(TryRecvError::Empty) => {
+                        pending = Some(frame);
                     }
-                }
+                    Err(TryRecvError::Disconnected) => return false,
+                },
                 Err(TrySendError::Disconnected(_)) => return false,
             }
         }
@@ -594,7 +610,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             return Ok(());
         }
 
-        let y_data = read_texture_plane(device, queue, &frame.y_texture, frame.width, frame.height, 1)?;
+        let y_data = read_texture_plane(
+            device,
+            queue,
+            &frame.y_texture,
+            frame.width,
+            frame.height,
+            1,
+        )?;
         let uv_data = read_texture_plane(
             device,
             queue,
@@ -605,9 +628,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         )?;
 
         let dump_path = std::env::current_dir()?.join("target/imported_frame.ppm");
-        std::fs::write(std::env::current_dir()?.join("target/imported_y.raw"), &y_data)?;
-        std::fs::write(std::env::current_dir()?.join("target/imported_uv.raw"), &uv_data)?;
-        write_nv12_like_ppm(&dump_path, frame.width as usize, frame.height as usize, &y_data, &uv_data)?;
+        std::fs::write(
+            std::env::current_dir()?.join("target/imported_y.raw"),
+            &y_data,
+        )?;
+        std::fs::write(
+            std::env::current_dir()?.join("target/imported_uv.raw"),
+            &uv_data,
+        )?;
+        write_nv12_like_ppm(
+            &dump_path,
+            frame.width as usize,
+            frame.height as usize,
+            &y_data,
+            &uv_data,
+        )?;
 
         eprintln!(
             "dumped imported frame to {} y[:16]={:?} uv[:16]={:?}",
@@ -732,7 +767,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             }
             let window = Arc::new(
                 event_loop
-                    .create_window(Window::default_attributes().with_title("wgpu-video VA-API + wgpu"))
+                    .create_window(
+                        Window::default_attributes().with_title("wgpu-video VA-API + wgpu"),
+                    )
                     .expect("window creation should succeed"),
             );
             match PlayerState::new(window.clone()) {
@@ -759,25 +796,26 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             match event {
                 WindowEvent::CloseRequested => event_loop.exit(),
                 WindowEvent::Resized(size) => state.resize(size.width, size.height),
-                WindowEvent::RedrawRequested => {
-                    match state.render() {
-                        Ok(RenderOutcome::Continue) => state._window.request_redraw(),
-                        Ok(RenderOutcome::Finished) => event_loop.exit(),
-                        Err(err) => {
-                            eprintln!("render failed: {err}");
-                            event_loop.exit();
-                        }
+                WindowEvent::RedrawRequested => match state.render() {
+                    Ok(RenderOutcome::Continue) => state._window.request_redraw(),
+                    Ok(RenderOutcome::Finished) => event_loop.exit(),
+                    Err(err) => {
+                        eprintln!("render failed: {err}");
+                        event_loop.exit();
                     }
-                }
+                },
                 _ => {}
             }
         }
     }
 
     pub fn run() -> Result<(), String> {
-        let event_loop = EventLoop::new().map_err(|err| format!("event loop creation failed: {err}"))?;
+        let event_loop =
+            EventLoop::new().map_err(|err| format!("event loop creation failed: {err}"))?;
         let mut app = App::default();
-        event_loop.run_app(&mut app).map_err(|err| format!("event loop failed: {err}"))
+        event_loop
+            .run_app(&mut app)
+            .map_err(|err| format!("event loop failed: {err}"))
     }
 }
 

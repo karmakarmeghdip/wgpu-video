@@ -236,7 +236,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
             let input_row = container(
                 row![
-                    text_input("/path/to/video.mp4", &self.path_input)
+                    text_input("/path/to/video.(mp4|mkv|webm)", &self.path_input)
                         .on_input(Message::PathEdited)
                         .on_submit(Message::OpenPressed)
                         .padding(14)

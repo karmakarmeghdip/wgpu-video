@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{anyhow, bail, Context};
 use codecs::backend::vaapi::decoder::VaapiBackend as CodecVaapiBackend;
 use codecs::backend::vaapi::decoder::VaapiDecodedHandle;
+use codecs::decoder::stateless::av1::Av1;
 use codecs::decoder::stateless::h264::H264;
+use codecs::decoder::stateless::vp8::Vp8;
+use codecs::decoder::stateless::vp9::Vp9;
 use codecs::decoder::stateless::{DecodeError, StatelessDecoder, StatelessVideoDecoder};
 use codecs::decoder::{DecodedHandle, DecoderEvent, StreamInfo};
 use codecs::video_frame::frame_pool::{FramePool, PooledVideoFrame};
@@ -15,7 +18,9 @@ use codecs::video_frame::VideoFrame;
 use codecs::{BlockingMode, Fourcc, Resolution};
 use libva::{Display, Surface, UsageHint};
 
-use crate::demuxer::{sample_presentation_timestamp, Demuxer, H264TrackConfig};
+use crate::demuxer::{
+    sample_presentation_timestamp, Demuxer, H264TrackConfig, VideoCodec, VideoTrackConfig,
+};
 
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
@@ -101,7 +106,86 @@ pub enum CpuRgbaFormat {
 }
 
 type DecoderFrame = PooledVideoFrame<NativeVaFrame>;
+type DecoderHandle = Rc<RefCell<VaapiDecodedHandle<DecoderFrame>>>;
 type H264Decoder = StatelessDecoder<H264, CodecVaapiBackend<DecoderFrame>>;
+type Vp8Decoder = StatelessDecoder<Vp8, CodecVaapiBackend<DecoderFrame>>;
+type Vp9Decoder = StatelessDecoder<Vp9, CodecVaapiBackend<DecoderFrame>>;
+type Av1Decoder = StatelessDecoder<Av1, CodecVaapiBackend<DecoderFrame>>;
+
+enum ActiveDecoder {
+    H264(H264Decoder),
+    Vp8(Vp8Decoder),
+    Vp9(Vp9Decoder),
+    Av1(Av1Decoder),
+}
+
+impl ActiveDecoder {
+    fn new(codec: VideoCodec, display: Rc<Display>) -> anyhow::Result<Self> {
+        match codec {
+            VideoCodec::H264 => {
+                StatelessDecoder::<H264, _>::new_vaapi(display, BlockingMode::Blocking)
+                    .map(Self::H264)
+                    .map_err(|err| anyhow!("Failed to create VA-API H.264 decoder: {err:?}"))
+            }
+            VideoCodec::Vp8 => {
+                StatelessDecoder::<Vp8, _>::new_vaapi(display, BlockingMode::Blocking)
+                    .map(Self::Vp8)
+                    .map_err(|err| anyhow!("Failed to create VA-API VP8 decoder: {err:?}"))
+            }
+            VideoCodec::Vp9 => {
+                StatelessDecoder::<Vp9, _>::new_vaapi(display, BlockingMode::Blocking)
+                    .map(Self::Vp9)
+                    .map_err(|err| anyhow!("Failed to create VA-API VP9 decoder: {err:?}"))
+            }
+            VideoCodec::Av1 => {
+                StatelessDecoder::<Av1, _>::new_vaapi(display, BlockingMode::Blocking)
+                    .map(Self::Av1)
+                    .map_err(|err| anyhow!("Failed to create VA-API AV1 decoder: {err:?}"))
+            }
+        }
+    }
+
+    fn decode(
+        &mut self,
+        timestamp: u64,
+        bitstream: &[u8],
+        alloc_cb: &mut dyn FnMut() -> Option<DecoderFrame>,
+    ) -> Result<usize, DecodeError> {
+        match self {
+            Self::H264(decoder) => decoder.decode(timestamp, bitstream, alloc_cb),
+            Self::Vp8(decoder) => decoder.decode(timestamp, bitstream, alloc_cb),
+            Self::Vp9(decoder) => decoder.decode(timestamp, bitstream, alloc_cb),
+            Self::Av1(decoder) => decoder.decode(timestamp, bitstream, alloc_cb),
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), DecodeError> {
+        match self {
+            Self::H264(decoder) => decoder.flush(),
+            Self::Vp8(decoder) => decoder.flush(),
+            Self::Vp9(decoder) => decoder.flush(),
+            Self::Av1(decoder) => decoder.flush(),
+        }
+    }
+
+    fn next_event(&mut self) -> Option<DecoderEvent<DecoderHandle>> {
+        match self {
+            Self::H264(decoder) => decoder.next_event(),
+            Self::Vp8(decoder) => decoder.next_event(),
+            Self::Vp9(decoder) => decoder.next_event(),
+            Self::Av1(decoder) => decoder.next_event(),
+        }
+    }
+
+    fn stream_info(&self) -> Option<&StreamInfo> {
+        match self {
+            Self::H264(decoder) => decoder.stream_info(),
+            Self::Vp8(decoder) => decoder.stream_info(),
+            Self::Vp9(decoder) => decoder.stream_info(),
+            Self::Av1(decoder) => decoder.stream_info(),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct NativeVaFrame {
@@ -163,8 +247,9 @@ impl VideoFrame for NativeVaFrame {
 
 pub struct VaapiBackend {
     display: Rc<Display>,
-    decoder: H264Decoder,
+    decoder: ActiveDecoder,
     framepool: FramePool<NativeVaFrame>,
+    active_codec: VideoCodec,
     parameter_sets_sent: bool,
 }
 
@@ -176,9 +261,7 @@ impl VaapiBackend {
     pub fn new_with_render_node(render_node: &Path) -> anyhow::Result<Self> {
         let display = Display::open_drm_display(render_node)
             .with_context(|| format!("Failed to open VA display on {}", render_node.display()))?;
-        let decoder =
-            StatelessDecoder::<H264, _>::new_vaapi(display.clone(), BlockingMode::Blocking)
-                .map_err(|err| anyhow!("Failed to create VA-API H.264 decoder: {err:?}"))?;
+        let decoder = ActiveDecoder::new(VideoCodec::H264, display.clone())?;
         let framepool = FramePool::new(move |stream_info: &StreamInfo| NativeVaFrame {
             coded_resolution: stream_info.coded_resolution,
             display_resolution: stream_info.display_resolution,
@@ -188,8 +271,20 @@ impl VaapiBackend {
             display,
             decoder,
             framepool,
+            active_codec: VideoCodec::H264,
             parameter_sets_sent: false,
         })
+    }
+
+    fn ensure_decoder(&mut self, codec: VideoCodec) -> anyhow::Result<()> {
+        if self.active_codec == codec {
+            return Ok(());
+        }
+
+        self.decoder = ActiveDecoder::new(codec, self.display.clone())?;
+        self.active_codec = codec;
+        self.parameter_sets_sent = false;
+        Ok(())
     }
 
     pub fn decode_h264_mp4_track(
@@ -198,6 +293,7 @@ impl VaapiBackend {
         track_id: u32,
         export_frame_limit: usize,
     ) -> anyhow::Result<DecodeReport> {
+        self.ensure_decoder(VideoCodec::H264)?;
         let config = demuxer.get_h264_track_config(track_id)?;
         let sample_count = demuxer.sample_count(track_id)?;
         let mut report = DecodeReport {
@@ -250,6 +346,7 @@ impl VaapiBackend {
     where
         F: FnMut(PrimeDmabufFrame) -> anyhow::Result<()>,
     {
+        self.ensure_decoder(VideoCodec::H264)?;
         let config = demuxer.get_h264_track_config(track_id)?;
         let sample_count = demuxer.sample_count(track_id)?;
         let mut report = DecodeReport {
@@ -302,6 +399,7 @@ impl VaapiBackend {
     where
         F: FnMut(CpuNv12Frame) -> anyhow::Result<()>,
     {
+        self.ensure_decoder(VideoCodec::H264)?;
         let config = demuxer.get_h264_track_config(track_id)?;
         let sample_count = demuxer.sample_count(track_id)?;
         let mut report = DecodeReport {
@@ -354,6 +452,7 @@ impl VaapiBackend {
     where
         F: FnMut(CpuRgbaFrame) -> anyhow::Result<()>,
     {
+        self.ensure_decoder(VideoCodec::H264)?;
         let config = demuxer.get_h264_track_config(track_id)?;
         let sample_count = demuxer.sample_count(track_id)?;
         let mut report = DecodeReport {
@@ -395,6 +494,28 @@ impl VaapiBackend {
         }
 
         Ok(report)
+    }
+
+    pub fn decode_video_track_with_prime_frames<F>(
+        &mut self,
+        demuxer: &mut Demuxer,
+        track_id: u32,
+        mut on_frame: F,
+    ) -> anyhow::Result<DecodeReport>
+    where
+        F: FnMut(PrimeDmabufFrame) -> anyhow::Result<()>,
+    {
+        let track = demuxer.get_track_config(track_id)?;
+        self.ensure_decoder(track.codec)?;
+
+        match track.codec {
+            VideoCodec::H264 => {
+                self.decode_h264_track_with_prime_frames(demuxer, &track, &mut on_frame)
+            }
+            VideoCodec::Vp8 | VideoCodec::Vp9 | VideoCodec::Av1 => {
+                self.decode_passthrough_track_with_prime_frames(demuxer, &track, &mut on_frame)
+            }
+        }
     }
 
     fn decode_annex_b_packet(
@@ -568,6 +689,149 @@ impl VaapiBackend {
         }
 
         self.handle_decoder_events_with_rgba_callback(report, on_frame)?;
+        Ok(())
+    }
+
+    fn decode_h264_track_with_prime_frames<F>(
+        &mut self,
+        demuxer: &mut Demuxer,
+        track: &VideoTrackConfig,
+        on_frame: &mut F,
+    ) -> anyhow::Result<DecodeReport>
+    where
+        F: FnMut(PrimeDmabufFrame) -> anyhow::Result<()>,
+    {
+        let config = track
+            .h264
+            .clone()
+            .ok_or_else(|| anyhow!("Track {} is missing H.264 configuration", track.track_id))?;
+        let sample_count = demuxer.sample_count(track.track_id)?;
+        let mut report = DecodeReport {
+            track_id: track.track_id,
+            timescale: track.timescale,
+            packets_decoded: 0,
+            frames_decoded: 0,
+            exported_frames: Vec::new(),
+        };
+
+        for sample_id in 1..=sample_count {
+            let Some(sample) = demuxer.read_sample(track.track_id, sample_id)? else {
+                continue;
+            };
+            let annex_b = sample_to_annex_b(
+                &config,
+                &sample.bytes,
+                sample.is_sync,
+                &mut self.parameter_sets_sent,
+            )
+            .with_context(|| format!("Failed to convert sample {sample_id} to Annex-B"))?;
+            self.decode_annex_b_packet_with_callback(
+                sample_presentation_timestamp(&sample),
+                &annex_b,
+                &mut report,
+                on_frame,
+            )
+            .with_context(|| format!("Failed to decode sample {sample_id}"))?;
+            report.packets_decoded += 1;
+        }
+
+        self.decoder
+            .flush()
+            .map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
+        self.handle_decoder_events_with_callback(&mut report, on_frame)?;
+
+        if report.frames_decoded == 0 {
+            bail!("Decoder finished without producing any frame")
+        }
+
+        Ok(report)
+    }
+
+    fn decode_passthrough_track_with_prime_frames<F>(
+        &mut self,
+        demuxer: &mut Demuxer,
+        track: &VideoTrackConfig,
+        on_frame: &mut F,
+    ) -> anyhow::Result<DecodeReport>
+    where
+        F: FnMut(PrimeDmabufFrame) -> anyhow::Result<()>,
+    {
+        let sample_count = demuxer.sample_count(track.track_id)?;
+        let mut report = DecodeReport {
+            track_id: track.track_id,
+            timescale: track.timescale,
+            packets_decoded: 0,
+            frames_decoded: 0,
+            exported_frames: Vec::new(),
+        };
+
+        for sample_id in 1..=sample_count {
+            let Some(sample) = demuxer.read_sample(track.track_id, sample_id)? else {
+                continue;
+            };
+            self.decode_packet_with_callback(
+                sample_presentation_timestamp(&sample),
+                &sample.bytes,
+                &mut report,
+                on_frame,
+            )
+            .with_context(|| format!("Failed to decode sample {sample_id}"))?;
+            report.packets_decoded += 1;
+        }
+
+        self.decoder
+            .flush()
+            .map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
+        self.handle_decoder_events_with_callback(&mut report, on_frame)?;
+
+        if report.frames_decoded == 0 {
+            bail!("Decoder finished without producing any frame")
+        }
+
+        Ok(report)
+    }
+
+    fn decode_packet_with_callback<F>(
+        &mut self,
+        timestamp: u64,
+        packet: &[u8],
+        report: &mut DecodeReport,
+        on_frame: &mut F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(PrimeDmabufFrame) -> anyhow::Result<()>,
+    {
+        let mut remaining = packet;
+
+        while !remaining.is_empty() {
+            let decode_result = {
+                let decoder = &mut self.decoder;
+                let framepool = &mut self.framepool;
+                let mut alloc_cb = || framepool.alloc();
+                decoder.decode(timestamp, remaining, &mut alloc_cb)
+            };
+
+            match decode_result {
+                Ok(consumed) => {
+                    if consumed == 0 {
+                        bail!("Decoder consumed 0 bytes from a non-empty packet")
+                    }
+                    remaining = &remaining[consumed..];
+                }
+                Err(DecodeError::CheckEvents) => {
+                    self.handle_decoder_events_with_callback(report, on_frame)?;
+                }
+                Err(DecodeError::NotEnoughOutputBuffers(_)) => {
+                    let drained = self.handle_decoder_events_with_callback(report, on_frame)?;
+                    if drained == 0 {
+                        bail!("Decoder ran out of output buffers and no frame became available")
+                    }
+                }
+                Err(err) => return Err(anyhow!("Decoder error: {err:?}")),
+            }
+        }
+
+        self.handle_decoder_events_with_callback(report, on_frame)?;
         Ok(())
     }
 
@@ -1020,17 +1284,22 @@ fn sample_to_annex_b(
     is_sync: bool,
     parameter_sets_sent: &mut bool,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut annex_b = convert_avcc_packet(packet)?;
+    let mut annex_b = convert_avcc_packet(packet, config.nal_length_size)?;
 
     if !*parameter_sets_sent || is_sync {
-        let mut with_headers = Vec::with_capacity(
-            annex_b.len()
-                + config.sequence_parameter_set.len()
-                + config.picture_parameter_set.len()
-                + 8,
-        );
-        push_annex_b_nal(&mut with_headers, &config.sequence_parameter_set);
-        push_annex_b_nal(&mut with_headers, &config.picture_parameter_set);
+        let header_bytes = config
+            .sequence_parameter_sets
+            .iter()
+            .chain(config.picture_parameter_sets.iter())
+            .map(|nal| nal.len() + ANNEX_B_START_CODE.len())
+            .sum::<usize>();
+        let mut with_headers = Vec::with_capacity(annex_b.len() + header_bytes);
+        for nal in &config.sequence_parameter_sets {
+            push_annex_b_nal(&mut with_headers, nal);
+        }
+        for nal in &config.picture_parameter_sets {
+            push_annex_b_nal(&mut with_headers, nal);
+        }
         with_headers.append(&mut annex_b);
         annex_b = with_headers;
         *parameter_sets_sent = true;
@@ -1039,16 +1308,13 @@ fn sample_to_annex_b(
     Ok(annex_b)
 }
 
-fn convert_avcc_packet(packet: &[u8]) -> anyhow::Result<Vec<u8>> {
-    for length_size in [4usize, 2, 1] {
-        if let Some(annex_b) = try_convert_avcc_packet(packet, length_size) {
-            return Ok(annex_b);
-        }
-    }
-
-    Err(anyhow!(
-        "Unsupported AVC sample layout; failed to infer NAL length prefix size"
-    ))
+fn convert_avcc_packet(packet: &[u8], length_size: usize) -> anyhow::Result<Vec<u8>> {
+    try_convert_avcc_packet(packet, length_size).ok_or_else(|| {
+        anyhow!(
+            "Unsupported AVC sample layout; failed to parse NAL length prefix size {}",
+            length_size
+        )
+    })
 }
 
 fn try_convert_avcc_packet(packet: &[u8], length_size: usize) -> Option<Vec<u8>> {

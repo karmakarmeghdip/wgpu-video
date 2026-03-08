@@ -30,7 +30,7 @@ pub(super) fn spawn_decode_thread(
     let mut demuxer =
         Demuxer::new(&source).map_err(|err| PlayerError::DemuxError(format!("{err:#}")))?;
     let track_id = demuxer
-        .find_h264_track()
+        .find_video_track()
         .map_err(|err| PlayerError::DemuxError(format!("{err:#}")))?;
     let playback_timing = analyze_track_timing(&mut demuxer, track_id)?;
 
@@ -50,9 +50,9 @@ fn decode_all_frames(
     playback_timing: PlaybackTiming,
 ) -> anyhow::Result<()> {
     let mut demuxer = Demuxer::new(&source)?;
-    let track_id = demuxer.find_h264_track()?;
+    let track_id = demuxer.find_video_track()?;
     let mut backend = VaapiBackend::new()?;
-    backend.decode_h264_mp4_track_with_prime_frames(&mut demuxer, track_id, |frame| {
+    backend.decode_video_track_with_prime_frames(&mut demuxer, track_id, |frame| {
         let presentation_time = timestamp_delta_to_duration(
             frame
                 .metadata
@@ -75,7 +75,7 @@ fn analyze_track_timing(
     track_id: u32,
 ) -> Result<PlaybackTiming, PlayerError> {
     let timescale = demuxer
-        .get_h264_track_config(track_id)
+        .get_track_config(track_id)
         .map_err(|err| PlayerError::DemuxError(format!("{err:#}")))?
         .timescale
         .max(1);
