@@ -13,7 +13,7 @@ use super::{
     BackendKind, PlaybackDiagnostics, PlayerBackend, PlayerConfig, PlayerError, TickResult,
     VideoSource,
 };
-use decode::{spawn_decode_thread, DecodedFramePacket, PlaybackTiming};
+use decode::{DecodedFramePacket, PlaybackTiming, spawn_decode_thread};
 use renderer::{OutputFrame, VideoRenderer};
 
 pub(crate) struct LibvaPlayer {
@@ -96,6 +96,7 @@ impl LibvaPlayer {
         self.frame_rx = frame_rx;
         self.playback_timing = playback_timing;
         self.next_packet = None;
+        self.output = None;
         self.paused_position = Duration::ZERO;
         self.started_at = None;
         self.waiting_for_preroll = self.playing;

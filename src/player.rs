@@ -154,13 +154,13 @@ impl VideoPlayer {
             BackendKind::Auto | BackendKind::Wmf => {
                 return Err(PlayerError::Unsupported(
                     "Windows playback backend has not been implemented yet".to_string(),
-                ))
+                ));
             }
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(PlayerError::Unsupported(
                     "No playback backend is available for this platform".to_string(),
-                ))
+                ));
             }
         };
 

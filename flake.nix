@@ -7,8 +7,15 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
@@ -16,7 +23,10 @@
         };
 
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" ];
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+          ];
           targets = [ "x86_64-pc-windows-msvc" ];
         };
 
@@ -50,6 +60,9 @@
           libva
           libdrm
           ffmpeg
+
+          # Audio libraries
+          alsa-lib
         ];
 
         nativeBuildInputs = with pkgs; [

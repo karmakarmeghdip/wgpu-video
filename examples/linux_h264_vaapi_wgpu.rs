@@ -3,12 +3,12 @@ mod app {
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
+    use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
     use wgpu::{
         BindGroup, BindGroupLayout, Color, ColorTargetState, CommandEncoderDescriptor,
         CompositeAlphaMode, Device, DeviceDescriptor, Features, FilterMode, FragmentState,
@@ -22,8 +22,8 @@ mod app {
         TextureViewDimension, VertexState,
     };
     use wgpu_video::{
-        demuxer::Demuxer, ImportedPlaneFrame, PrimeDmabufFrame, VaapiBackend,
-        VaapiVulkanFrameImporter,
+        ImportedPlaneFrame, PrimeDmabufFrame, VaapiBackend, VaapiVulkanFrameImporter,
+        demuxer::Demuxer,
     };
     use winit::{
         application::ApplicationHandler,

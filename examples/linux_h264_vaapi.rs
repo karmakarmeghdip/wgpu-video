@@ -3,8 +3,8 @@ fn main() -> anyhow::Result<()> {
     use std::env;
     use std::path::Path;
 
-    use wgpu_video::demuxer::{Demuxer, VideoCodec};
     use wgpu_video::VaapiBackend;
+    use wgpu_video::demuxer::{Demuxer, VideoCodec};
 
     let input = env::args()
         .nth(1)
@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
     let mut backend = VaapiBackend::new()?;
     let report = match demuxer.get_track_info(track_id)? {
         VideoCodec::H264 => backend.decode_h264_mp4_track(&mut demuxer, track_id, 8)?,
-        VideoCodec::Vp8 | VideoCodec::Vp9 | VideoCodec::Av1 => {
+        VideoCodec::H265 | VideoCodec::Vp8 | VideoCodec::Vp9 | VideoCodec::Av1 => {
             backend.decode_video_track_with_prime_frames(&mut demuxer, track_id, |_frame| Ok(()))?
         }
     };
@@ -49,11 +49,7 @@ fn main() -> anyhow::Result<()> {
         for (layer_index, layer) in frame.layers.iter().enumerate() {
             println!(
                 "  layer #{layer_index}: drm_format=0x{:08x} planes={} object_index={:?} offset={:?} pitch={:?}",
-                layer.drm_format,
-                layer.num_planes,
-                layer.object_index,
-                layer.offset,
-                layer.pitch,
+                layer.drm_format, layer.num_planes, layer.object_index, layer.offset, layer.pitch,
             );
         }
     }

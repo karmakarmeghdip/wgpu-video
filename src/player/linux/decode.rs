@@ -2,10 +2,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Context;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, SendError, Sender, bounded};
 
-use crate::demuxer::{sample_presentation_end_timestamp, sample_presentation_timestamp, Demuxer};
+use crate::demuxer::{Demuxer, sample_presentation_end_timestamp, sample_presentation_timestamp};
 use crate::{PrimeDmabufFrame, VaapiBackend};
 
 use super::super::PlayerError;
@@ -60,11 +59,12 @@ fn decode_all_frames(
                 .saturating_sub(playback_timing.first_timestamp),
             playback_timing.timescale,
         );
-        tx.send(DecodedFramePacket {
+        if let Err(SendError(_)) = tx.send(DecodedFramePacket {
             frame,
             presentation_time,
-        })
-        .context("frame queue receiver dropped")?;
+        }) {
+            return Ok(());
+        }
         Ok(())
     })?;
     Ok(())
