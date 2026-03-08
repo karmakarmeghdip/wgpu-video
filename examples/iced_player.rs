@@ -8,14 +8,15 @@ mod app {
     use iced::time;
     use iced::widget::button as button_style;
     use iced::widget::container as container_style;
-    use iced::widget::shader::{self as shader_program, Viewport};
+    use iced::widget::shader::{self as shader_program, Action as ShaderAction, Viewport};
     use iced::widget::{
         button, checkbox, column, container, progress_bar, row, shader, text, text_input,
     };
     use iced::{
-        Background, Border, Color, Element, Fill, FillPortion, Rectangle, Subscription, Theme,
+        Background, Border, Color, Element, Event, Fill, FillPortion, Rectangle, Subscription,
+        Theme,
     };
-    use wgpu_video::{BackendKind, PlayerConfig, VideoPlayer};
+    use wgpu_video::{BackendKind, PlaybackDiagnostics, PlayerConfig, VideoPlayer};
 
     const VIDEO_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
     const RGBA_VIDEO_SHADER: &str = r#"
@@ -53,7 +54,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         TogglePlayback,
         RestartPressed,
         ToggleLoop(bool),
-        FrameTick,
+        UiRefresh,
     }
 
     pub fn run() -> iced::Result {
@@ -151,18 +152,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 Message::ToggleLoop(enabled) => {
                     self.loop_playback = enabled;
                 }
-                Message::FrameTick => {}
+                Message::UiRefresh => {}
             }
         }
 
         fn subscription(&self) -> Subscription<Message> {
-            let snapshot = self.snapshot();
-
-            if let Some(delay) = snapshot.next_wakeup {
-                time::every(delay.max(Duration::from_millis(1))).map(|_| Message::FrameTick)
-            } else {
-                Subscription::none()
-            }
+            time::every(Duration::from_millis(50)).map(|_| Message::UiRefresh)
         }
 
         fn theme(&self) -> Theme {
@@ -214,6 +209,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             } else {
                 "Paste a local video file path and press Open.".to_owned()
             };
+            let diagnostics = snapshot.diagnostics;
+            let diagnostics_line = format!(
+                "presented={} dropped={} late={} buffered={} preroll={} last_late_ms={:.2} max_late_ms={:.2}",
+                diagnostics.presented_frames,
+                diagnostics.dropped_frames,
+                diagnostics.late_frames,
+                diagnostics.buffered_frames,
+                diagnostics.waiting_for_preroll,
+                diagnostics.last_frame_lateness.as_secs_f64() * 1000.0,
+                diagnostics.max_frame_lateness.as_secs_f64() * 1000.0,
+            );
 
             let header = container(
                 column![
@@ -285,6 +291,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                     text(path_label)
                         .size(14)
                         .color(Color::from_rgb8(0x6D, 0x77, 0x80)),
+                    text(diagnostics_line)
+                        .size(13)
+                        .color(Color::from_rgb8(0x6A, 0x63, 0x58)),
                 ]
                 .spacing(14),
             )
@@ -326,7 +335,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         duration: Duration,
         position: Duration,
         dimensions: Option<(u32, u32)>,
-        next_wakeup: Option<Duration>,
+        diagnostics: PlaybackDiagnostics,
         is_playing: bool,
         reached_end: bool,
     }
@@ -340,6 +349,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         position: Duration,
         dimensions: Option<(u32, u32)>,
         next_wakeup: Option<Duration>,
+        diagnostics: PlaybackDiagnostics,
         is_playing: bool,
         reached_end: bool,
     }
@@ -353,7 +363,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 duration: self.duration,
                 position: self.position,
                 dimensions: self.dimensions,
-                next_wakeup: self.next_wakeup,
+                diagnostics: self.diagnostics,
                 is_playing: self.is_playing,
                 reached_end: self.reached_end,
             }
@@ -418,6 +428,36 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     impl<Message> shader_program::Program<Message> for VideoSurface {
         type State = ();
         type Primitive = VideoPrimitive;
+
+        fn update(
+            &self,
+            _state: &mut Self::State,
+            event: &Event,
+            _bounds: Rectangle,
+            _cursor: mouse::Cursor,
+        ) -> Option<ShaderAction<Message>> {
+            if matches!(
+                event,
+                Event::Window(iced::window::Event::RedrawRequested(_))
+            ) {
+                let delay = self
+                    .shared
+                    .lock()
+                    .expect("playback state lock should succeed")
+                    .status
+                    .next_wakeup;
+
+                return Some(match delay {
+                    Some(delay) if delay <= Duration::from_millis(1) => {
+                        ShaderAction::request_redraw()
+                    }
+                    Some(delay) => ShaderAction::request_redraw_at(Instant::now() + delay),
+                    None => ShaderAction::request_redraw(),
+                });
+            }
+
+            None
+        }
 
         fn draw(
             &self,
@@ -653,6 +693,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 status.next_wakeup = player
                     .next_frame_deadline()
                     .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                status.diagnostics = player.diagnostics();
                 let dimensions = player.dimensions();
                 status.dimensions = if dimensions.0 > 0 && dimensions.1 > 0 {
                     Some(dimensions)
@@ -670,6 +711,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 status.position = Duration::ZERO;
                 status.dimensions = self.video_size;
                 status.next_wakeup = None;
+                status.diagnostics = PlaybackDiagnostics::default();
                 status.is_playing = false;
             }
 

@@ -1,12 +1,15 @@
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use ash::vk;
 use libloading::Library;
 use wgpu::hal::api::Vulkan as VkApi;
 
 use super::libva::PrimeDmabufFrame;
+
+const GPU_INIT_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const GPU_FENCE_TIMEOUT_NS: u64 = 1_000_000_000;
 
 pub struct ImportedPlaneFrame {
     pub timestamp: u64,
@@ -42,11 +45,12 @@ impl VaapiVulkanFrameImporter {
     }
 
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> anyhow::Result<Self> {
-        let vulkan_loader = unsafe { Library::new("libvulkan.so.1") }
-            .context("Failed to load libvulkan.so.1")?;
+        let vulkan_loader =
+            unsafe { Library::new("libvulkan.so.1") }.context("Failed to load libvulkan.so.1")?;
         let (command_pool, external_memory_fd_fns) = {
-            let hal_device = unsafe { device.as_hal::<VkApi>() }
-                .ok_or_else(|| anyhow!("The supplied wgpu device is not using the Vulkan backend"))?;
+            let hal_device = unsafe { device.as_hal::<VkApi>() }.ok_or_else(|| {
+                anyhow!("The supplied wgpu device is not using the Vulkan backend")
+            })?;
             let raw_device = hal_device.raw_device();
             let external_memory_fd_fns = load_external_memory_fd_fns(raw_device, &vulkan_loader)?;
             let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -67,7 +71,10 @@ impl VaapiVulkanFrameImporter {
         })
     }
 
-    pub fn import_prime_frame(&mut self, frame: PrimeDmabufFrame) -> anyhow::Result<ImportedPlaneFrame> {
+    pub fn import_prime_frame(
+        &mut self,
+        frame: PrimeDmabufFrame,
+    ) -> anyhow::Result<ImportedPlaneFrame> {
         self.cleanup_completed()?;
 
         let mut descriptor = frame.descriptor;
@@ -94,11 +101,9 @@ impl VaapiVulkanFrameImporter {
             bail!("Only single-object NV12 PRIME descriptors are currently supported")
         }
 
-        let object = descriptor
-            .objects
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("PRIME descriptor did not contain an exported dma-buf object"))?;
+        let object = descriptor.objects.into_iter().next().ok_or_else(|| {
+            anyhow!("PRIME descriptor did not contain an exported dma-buf object")
+        })?;
 
         let imported_image = self.import_nv12_dmabuf_as_image(
             raw_device,
@@ -113,7 +118,8 @@ impl VaapiVulkanFrameImporter {
         )?;
 
         let (y_image, y_memory) = create_image(raw_device, width, height, vk::Format::R8_UNORM)?;
-        let (uv_image, uv_memory) = create_image(raw_device, uv_width, uv_height, vk::Format::R8G8_UNORM)?;
+        let (uv_image, uv_memory) =
+            create_image(raw_device, uv_width, uv_height, vk::Format::R8G8_UNORM)?;
 
         let y_texture = wrap_image_as_texture(
             &self.device,
@@ -139,10 +145,12 @@ impl VaapiVulkanFrameImporter {
         initialize_imported_texture(&self.queue, &y_texture, width, height, 1);
         initialize_imported_texture(&self.queue, &uv_texture, uv_width, uv_height, 2);
         let init_submission = self.queue.submit([]);
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(init_submission),
-            timeout: None,
-        });
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(init_submission),
+                timeout: Some(GPU_INIT_POLL_TIMEOUT),
+            })
+            .context("Timed out waiting for initialized import textures")?;
 
         let command_buffer = self.allocate_command_buffer(raw_device)?;
         let fence = unsafe { raw_device.create_fence(&vk::FenceCreateInfo::default(), None) }
@@ -230,7 +238,11 @@ impl VaapiVulkanFrameImporter {
                         .base_array_layer(0)
                         .layer_count(1),
                 )
-                .extent(vk::Extent3D { width, height, depth: 1 });
+                .extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                });
             unsafe {
                 raw_device.cmd_copy_image(
                     command_buffer,
@@ -305,11 +317,10 @@ impl VaapiVulkanFrameImporter {
             unsafe { raw_device.end_command_buffer(command_buffer) }
                 .context("Failed to end Vulkan command buffer for dmabuf copy")?;
 
-            let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
-            unsafe {
-                raw_device.queue_submit(hal_device.raw_queue(), &[submit_info], fence)
-            }
-            .context("Failed to submit Vulkan dmabuf copy work")?;
+            let submit_info =
+                vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
+            unsafe { raw_device.queue_submit(hal_device.raw_queue(), &[submit_info], fence) }
+                .context("Failed to submit Vulkan dmabuf copy work")?;
 
             Ok(())
         })();
@@ -323,14 +334,14 @@ impl VaapiVulkanFrameImporter {
             return Err(err);
         }
 
+        let wait_result =
+            unsafe { raw_device.wait_for_fences(&[fence], true, GPU_FENCE_TIMEOUT_NS) };
         unsafe {
-            raw_device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .context("Failed to wait for Vulkan dmabuf copy completion")?;
             destroy_imports(raw_device, vec![imported_image]);
             raw_device.free_command_buffers(self.command_pool, &[command_buffer]);
             raw_device.destroy_fence(fence, None);
         }
+        wait_result.context("Timed out waiting for Vulkan dmabuf copy completion")?;
 
         Ok(ImportedPlaneFrame {
             timestamp: frame.metadata.timestamp,
@@ -341,7 +352,10 @@ impl VaapiVulkanFrameImporter {
         })
     }
 
-    fn allocate_command_buffer(&self, raw_device: &ash::Device) -> anyhow::Result<vk::CommandBuffer> {
+    fn allocate_command_buffer(
+        &self,
+        raw_device: &ash::Device,
+    ) -> anyhow::Result<vk::CommandBuffer> {
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -437,7 +451,9 @@ impl VaapiVulkanFrameImporter {
         let memory_type_index = lowest_set_bit(memory_type_bits)
             .ok_or_else(|| anyhow!("No compatible Vulkan memory type for imported dmabuf"))?;
 
-        let import_fd = fd.try_clone().context("Failed to clone dmabuf fd for Vulkan import")?;
+        let import_fd = fd
+            .try_clone()
+            .context("Failed to clone dmabuf fd for Vulkan import")?;
         let import_fd_raw = import_fd.into_raw_fd();
         let mut import_info = vk::ImportMemoryFdInfoKHR::default()
             .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
@@ -451,7 +467,8 @@ impl VaapiVulkanFrameImporter {
             Err(err) => {
                 let _owned = unsafe { OwnedFd::from_raw_fd(import_fd_raw) };
                 unsafe { raw_device.destroy_image(image, None) };
-                return Err(anyhow!(err)).context("Failed to allocate Vulkan memory for dmabuf image import");
+                return Err(anyhow!(err))
+                    .context("Failed to allocate Vulkan memory for dmabuf image import");
             }
         };
         if let Err(err) = unsafe { raw_device.bind_image_memory(image, memory, 0) } {
@@ -459,7 +476,8 @@ impl VaapiVulkanFrameImporter {
                 raw_device.free_memory(memory, None);
                 raw_device.destroy_image(image, None);
             }
-            return Err(anyhow!(err)).context("Failed to bind imported dmabuf memory to Vulkan image");
+            return Err(anyhow!(err))
+                .context("Failed to bind imported dmabuf memory to Vulkan image");
         }
 
         Ok(ImportedImage { image, memory })
@@ -520,7 +538,11 @@ fn create_image(
     let info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(format)
-        .extent(vk::Extent3D { width, height, depth: 1 })
+        .extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        })
         .mip_levels(1)
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
@@ -540,7 +562,8 @@ fn create_image(
         Ok(memory) => memory,
         Err(err) => {
             unsafe { raw_device.destroy_image(image, None) };
-            return Err(anyhow!(err)).context("Failed to allocate Vulkan image memory for copied video plane");
+            return Err(anyhow!(err))
+                .context("Failed to allocate Vulkan image memory for copied video plane");
         }
     };
     if let Err(err) = unsafe { raw_device.bind_image_memory(image, memory, 0) } {
@@ -548,7 +571,8 @@ fn create_image(
             raw_device.free_memory(memory, None);
             raw_device.destroy_image(image, None);
         }
-        return Err(anyhow!(err)).context("Failed to bind Vulkan image memory for copied video plane");
+        return Err(anyhow!(err))
+            .context("Failed to bind Vulkan image memory for copied video plane");
     }
 
     Ok((image, memory))
@@ -705,14 +729,15 @@ fn load_external_memory_fd_fns(
     raw_device: &ash::Device,
     vulkan_loader: &Library,
 ) -> anyhow::Result<ash::khr::external_memory_fd::DeviceFn> {
-    let get_device_proc_addr = unsafe {
-        vulkan_loader.get::<vk::PFN_vkGetDeviceProcAddr>(b"vkGetDeviceProcAddr")
-    }
-    .context("Failed to resolve vkGetDeviceProcAddr")?;
+    let get_device_proc_addr =
+        unsafe { vulkan_loader.get::<vk::PFN_vkGetDeviceProcAddr>(b"vkGetDeviceProcAddr") }
+            .context("Failed to resolve vkGetDeviceProcAddr")?;
     let get_device_proc_addr = *get_device_proc_addr;
 
-    Ok(ash::khr::external_memory_fd::DeviceFn::load(|name| unsafe {
-        get_device_proc_addr(raw_device.handle(), name.as_ptr())
-            .map_or(std::ptr::null(), |proc| proc as *const _)
-    }))
+    Ok(ash::khr::external_memory_fd::DeviceFn::load(
+        |name| unsafe {
+            get_device_proc_addr(raw_device.handle(), name.as_ptr())
+                .map_or(std::ptr::null(), |proc| proc as *const _)
+        },
+    ))
 }

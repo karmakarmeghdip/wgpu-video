@@ -5,9 +5,11 @@ mod player;
 #[cfg(target_os = "linux")]
 pub use backend::libva::{
     CpuNv12Frame, CpuRgbaFormat, CpuRgbaFrame, DecodeReport, ExportedDmabufFrame,
-    ExportedDmabufLayer, ExportedDmabufObject, PrimeDmabufFrame, PrimeFrameMetadata,
-    VaapiBackend,
+    ExportedDmabufLayer, ExportedDmabufObject, PrimeDmabufFrame, PrimeFrameMetadata, VaapiBackend,
 };
 #[cfg(target_os = "linux")]
 pub use backend::libva_wgpu::{ImportedPlaneFrame, VaapiVulkanFrameImporter};
-pub use player::{BackendKind, PlayerConfig, PlayerError, TickResult, VideoPlayer, VideoSource};
+pub use player::{
+    BackendKind, PlaybackDiagnostics, PlayerConfig, PlayerError, TickResult, VideoPlayer,
+    VideoSource,
+};

@@ -9,7 +9,10 @@ use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::backend::libva_wgpu::VaapiVulkanFrameImporter;
 
-use super::{BackendKind, PlayerBackend, PlayerConfig, PlayerError, TickResult, VideoSource};
+use super::{
+    BackendKind, PlaybackDiagnostics, PlayerBackend, PlayerConfig, PlayerError, TickResult,
+    VideoSource,
+};
 use decode::{spawn_decode_thread, DecodedFramePacket, PlaybackTiming};
 use renderer::{OutputFrame, VideoRenderer};
 
@@ -26,10 +29,15 @@ pub(crate) struct LibvaPlayer {
     playback_timing: PlaybackTiming,
     paused_position: Duration,
     started_at: Option<Instant>,
+    waiting_for_preroll: bool,
+    diagnostics: PlaybackDiagnostics,
     playing: bool,
     receiver_closed: bool,
     ended: bool,
 }
+
+const PREROLL_FRAMES: usize = 3;
+const PREROLL_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 impl LibvaPlayer {
     pub(crate) fn new(
@@ -67,6 +75,8 @@ impl LibvaPlayer {
             playback_timing,
             paused_position: Duration::ZERO,
             started_at: None,
+            waiting_for_preroll: false,
+            diagnostics: PlaybackDiagnostics::default(),
             playing: false,
             receiver_closed: false,
             ended: false,
@@ -76,6 +86,7 @@ impl LibvaPlayer {
 
     fn with_autoplay(mut self) -> Self {
         self.playing = self.config.autoplay;
+        self.waiting_for_preroll = self.playing;
         self
     }
 
@@ -86,11 +97,8 @@ impl LibvaPlayer {
         self.playback_timing = playback_timing;
         self.next_packet = None;
         self.paused_position = Duration::ZERO;
-        self.started_at = if self.playing {
-            Some(Instant::now())
-        } else {
-            None
-        };
+        self.started_at = None;
+        self.waiting_for_preroll = self.playing;
         self.receiver_closed = false;
         self.ended = false;
         Ok(())
@@ -132,8 +140,30 @@ impl LibvaPlayer {
         }
     }
 
+    fn buffered_frame_count(&mut self) -> usize {
+        self.fill_next_packet();
+        let count = usize::from(self.next_packet.is_some()) + self.frame_rx.len();
+        self.diagnostics.buffered_frames = count;
+        count
+    }
+
+    fn maybe_finish_preroll(&mut self) {
+        if !self.waiting_for_preroll || !self.playing {
+            return;
+        }
+
+        let enough_frames = self.buffered_frame_count() >= PREROLL_FRAMES;
+        let no_more_frames = self.receiver_closed;
+
+        if enough_frames || no_more_frames {
+            self.waiting_for_preroll = false;
+            self.started_at = Some(Instant::now());
+        }
+    }
+
     fn present_due_frames(&mut self) -> Result<bool, PlayerError> {
         let mut latest_due = None;
+        let mut due_count = 0u64;
         let lead = self
             .playback_timing
             .frame_interval
@@ -149,12 +179,28 @@ impl LibvaPlayer {
             if packet.presentation_time > deadline {
                 break;
             }
+            due_count = due_count.saturating_add(1);
             latest_due = self.next_packet.take();
         }
 
         let Some(packet) = latest_due else {
             return Ok(false);
         };
+
+        let playback_position = self.playback_position();
+        let lateness = playback_position.saturating_sub(packet.presentation_time);
+        self.diagnostics.last_frame_lateness = lateness;
+        self.diagnostics.max_frame_lateness = self.diagnostics.max_frame_lateness.max(lateness);
+        if lateness > self.playback_timing.frame_interval {
+            self.diagnostics.late_frames = self.diagnostics.late_frames.saturating_add(1);
+        }
+        if due_count > 1 {
+            self.diagnostics.dropped_frames = self
+                .diagnostics
+                .dropped_frames
+                .saturating_add(due_count.saturating_sub(1));
+        }
+        self.diagnostics.presented_frames = self.diagnostics.presented_frames.saturating_add(1);
 
         let imported = self
             .importer
@@ -170,7 +216,14 @@ impl PlayerBackend for LibvaPlayer {
     fn poll(&mut self) -> Result<TickResult, PlayerError> {
         let mut result = TickResult::default();
 
-        if self.playing && !self.ended {
+        if self.playing {
+            self.maybe_finish_preroll();
+        }
+        self.diagnostics.waiting_for_preroll = self.waiting_for_preroll;
+        self.diagnostics.buffered_frames =
+            usize::from(self.next_packet.is_some()) + self.frame_rx.len();
+
+        if self.playing && !self.ended && !self.waiting_for_preroll {
             self.sync_playback_position();
             result.presented_frame = self.present_due_frames()?;
         } else {
@@ -202,6 +255,10 @@ impl PlayerBackend for LibvaPlayer {
             return None;
         }
 
+        if self.waiting_for_preroll {
+            return Some(Instant::now() + PREROLL_POLL_INTERVAL);
+        }
+
         let Some(packet) = self.next_packet.as_ref() else {
             return Some(Instant::now() + Duration::from_millis(5));
         };
@@ -212,6 +269,13 @@ impl PlayerBackend for LibvaPlayer {
         }
 
         Some(started_at + target_offset.saturating_sub(self.paused_position))
+    }
+
+    fn diagnostics(&self) -> PlaybackDiagnostics {
+        let mut diagnostics = self.diagnostics;
+        diagnostics.waiting_for_preroll = self.waiting_for_preroll;
+        diagnostics.buffered_frames = usize::from(self.next_packet.is_some()) + self.frame_rx.len();
+        diagnostics
     }
 
     fn texture_view(&self) -> Option<&wgpu::TextureView> {
@@ -230,15 +294,17 @@ impl PlayerBackend for LibvaPlayer {
             self.restart()?;
         }
         if !self.playing {
-            self.started_at = Some(Instant::now());
+            self.started_at = None;
         }
         self.playing = true;
+        self.waiting_for_preroll = true;
         Ok(())
     }
 
     fn pause(&mut self) {
         self.paused_position = self.playback_position();
         self.started_at = None;
+        self.waiting_for_preroll = false;
         self.playing = false;
     }
 

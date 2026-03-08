@@ -67,7 +67,7 @@ impl Default for PlayerConfig {
             autoplay: true,
             loop_playback: false,
             backend: BackendKind::Auto,
-            decode_queue_size: 4,
+            decode_queue_size: 8,
         }
     }
 }
@@ -76,6 +76,17 @@ impl Default for PlayerConfig {
 pub struct TickResult {
     pub presented_frame: bool,
     pub reached_end: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlaybackDiagnostics {
+    pub presented_frames: u64,
+    pub dropped_frames: u64,
+    pub late_frames: u64,
+    pub buffered_frames: usize,
+    pub waiting_for_preroll: bool,
+    pub last_frame_lateness: Duration,
+    pub max_frame_lateness: Duration,
 }
 
 #[derive(Debug)]
@@ -110,6 +121,7 @@ impl From<std::io::Error> for PlayerError {
 pub(crate) trait PlayerBackend: Send + Sync {
     fn poll(&mut self) -> Result<TickResult, PlayerError>;
     fn next_frame_deadline(&self) -> Option<Instant>;
+    fn diagnostics(&self) -> PlaybackDiagnostics;
     fn texture_view(&self) -> Option<&wgpu::TextureView>;
     fn dimensions(&self) -> (u32, u32);
     fn play(&mut self) -> Result<(), PlayerError>;
@@ -170,6 +182,10 @@ impl VideoPlayer {
 
     pub fn next_frame_deadline(&self) -> Option<Instant> {
         self.backend.next_frame_deadline()
+    }
+
+    pub fn diagnostics(&self) -> PlaybackDiagnostics {
+        self.backend.diagnostics()
     }
 
     pub fn texture_view(&self) -> Option<&wgpu::TextureView> {
