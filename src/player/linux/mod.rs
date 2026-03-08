@@ -3,19 +3,18 @@ mod renderer;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, TryRecvError};
-use wgpu::Device;
 
 use crate::backend::libva_wgpu::VaapiVulkanFrameImporter;
 
 use super::{BackendKind, PlayerBackend, PlayerConfig, PlayerError, TickResult, VideoSource};
-use decode::{DecodedFramePacket, PlaybackTiming, spawn_decode_thread};
+use decode::{spawn_decode_thread, DecodedFramePacket, PlaybackTiming};
 use renderer::{OutputFrame, VideoRenderer};
 
 pub(crate) struct LibvaPlayer {
-    device: Arc<Device>,
+    device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     source: PathBuf,
     config: PlayerConfig,
@@ -25,7 +24,8 @@ pub(crate) struct LibvaPlayer {
     next_packet: Option<DecodedFramePacket>,
     output: Option<OutputFrame>,
     playback_timing: PlaybackTiming,
-    playback_position: Duration,
+    paused_position: Duration,
+    started_at: Option<Instant>,
     playing: bool,
     receiver_closed: bool,
     ended: bool,
@@ -33,7 +33,7 @@ pub(crate) struct LibvaPlayer {
 
 impl LibvaPlayer {
     pub(crate) fn new(
-        device: Arc<Device>,
+        device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         source: VideoSource,
         config: PlayerConfig,
@@ -65,7 +65,8 @@ impl LibvaPlayer {
             next_packet: None,
             output: None,
             playback_timing,
-            playback_position: Duration::ZERO,
+            paused_position: Duration::ZERO,
+            started_at: None,
             playing: false,
             receiver_closed: false,
             ended: false,
@@ -84,10 +85,39 @@ impl LibvaPlayer {
         self.frame_rx = frame_rx;
         self.playback_timing = playback_timing;
         self.next_packet = None;
-        self.playback_position = Duration::ZERO;
+        self.paused_position = Duration::ZERO;
+        self.started_at = if self.playing {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.receiver_closed = false;
         self.ended = false;
         Ok(())
+    }
+
+    fn playback_position(&self) -> Duration {
+        if self.playing {
+            self.started_at
+                .map(|started_at| {
+                    self.paused_position
+                        .saturating_add(Instant::now().saturating_duration_since(started_at))
+                })
+                .unwrap_or(self.paused_position)
+                .min(self.playback_timing.expected_duration)
+        } else {
+            self.paused_position
+                .min(self.playback_timing.expected_duration)
+        }
+    }
+
+    fn sync_playback_position(&mut self) -> Duration {
+        let position = self.playback_position();
+        if self.playing {
+            self.paused_position = position;
+            self.started_at = Some(Instant::now());
+        }
+        position
     }
 
     fn fill_next_packet(&mut self) {
@@ -109,7 +139,7 @@ impl LibvaPlayer {
             .frame_interval
             .checked_div(2)
             .unwrap_or(Duration::ZERO);
-        let deadline = self.playback_position.saturating_add(lead);
+        let deadline = self.playback_position().saturating_add(lead);
 
         loop {
             self.fill_next_packet();
@@ -137,14 +167,11 @@ impl LibvaPlayer {
 }
 
 impl PlayerBackend for LibvaPlayer {
-    fn tick(&mut self, delta: Duration) -> Result<TickResult, PlayerError> {
+    fn poll(&mut self) -> Result<TickResult, PlayerError> {
         let mut result = TickResult::default();
 
         if self.playing && !self.ended {
-            self.playback_position = self
-                .playback_position
-                .saturating_add(delta)
-                .min(self.playback_timing.expected_duration);
+            self.sync_playback_position();
             result.presented_frame = self.present_due_frames()?;
         } else {
             self.fill_next_packet();
@@ -153,12 +180,14 @@ impl PlayerBackend for LibvaPlayer {
         if !self.ended
             && self.receiver_closed
             && self.next_packet.is_none()
-            && self.playback_position >= self.playback_timing.expected_duration
+            && self.playback_position() >= self.playback_timing.expected_duration
         {
             if self.config.loop_playback {
                 self.restart()?;
                 self.playing = self.config.autoplay;
             } else {
+                self.paused_position = self.playback_timing.expected_duration;
+                self.started_at = None;
                 self.playing = false;
                 self.ended = true;
                 result.reached_end = true;
@@ -166,6 +195,23 @@ impl PlayerBackend for LibvaPlayer {
         }
 
         Ok(result)
+    }
+
+    fn next_frame_deadline(&self) -> Option<Instant> {
+        if !self.playing || self.ended {
+            return None;
+        }
+
+        let Some(packet) = self.next_packet.as_ref() else {
+            return Some(Instant::now() + Duration::from_millis(5));
+        };
+        let started_at = self.started_at?;
+        let target_offset = packet.presentation_time;
+        if target_offset <= self.paused_position {
+            return Some(Instant::now());
+        }
+
+        Some(started_at + target_offset.saturating_sub(self.paused_position))
     }
 
     fn texture_view(&self) -> Option<&wgpu::TextureView> {
@@ -183,11 +229,16 @@ impl PlayerBackend for LibvaPlayer {
         if self.ended {
             self.restart()?;
         }
+        if !self.playing {
+            self.started_at = Some(Instant::now());
+        }
         self.playing = true;
         Ok(())
     }
 
     fn pause(&mut self) {
+        self.paused_position = self.playback_position();
+        self.started_at = None;
         self.playing = false;
     }
 
@@ -200,7 +251,7 @@ impl PlayerBackend for LibvaPlayer {
     }
 
     fn position(&self) -> Duration {
-        self.playback_position
+        self.playback_position()
     }
 
     fn seek(&mut self, _target: Duration) -> Result<(), PlayerError> {

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -107,8 +107,9 @@ impl From<std::io::Error> for PlayerError {
     }
 }
 
-pub(crate) trait PlayerBackend {
-    fn tick(&mut self, delta: Duration) -> Result<TickResult, PlayerError>;
+pub(crate) trait PlayerBackend: Send + Sync {
+    fn poll(&mut self) -> Result<TickResult, PlayerError>;
+    fn next_frame_deadline(&self) -> Option<Instant>;
     fn texture_view(&self) -> Option<&wgpu::TextureView>;
     fn dimensions(&self) -> (u32, u32);
     fn play(&mut self) -> Result<(), PlayerError>;
@@ -134,12 +135,9 @@ impl VideoPlayer {
         let source = source.into();
         let backend: Box<dyn PlayerBackend> = match config.backend {
             #[cfg(target_os = "linux")]
-            BackendKind::Auto | BackendKind::Libva => Box::new(linux::LibvaPlayer::new(
-                device,
-                queue,
-                source,
-                config,
-            )?),
+            BackendKind::Auto | BackendKind::Libva => {
+                Box::new(linux::LibvaPlayer::new(device, queue, source, config)?)
+            }
             #[cfg(target_os = "windows")]
             BackendKind::Auto | BackendKind::Wmf => {
                 return Err(PlayerError::Unsupported(
@@ -166,8 +164,12 @@ impl VideoPlayer {
         Self::new(device, queue, VideoSource::Path(path.into()), config)
     }
 
-    pub fn tick(&mut self, delta: Duration) -> Result<TickResult, PlayerError> {
-        self.backend.tick(delta)
+    pub fn poll(&mut self) -> Result<TickResult, PlayerError> {
+        self.backend.poll()
+    }
+
+    pub fn next_frame_deadline(&self) -> Option<Instant> {
+        self.backend.next_frame_deadline()
     }
 
     pub fn texture_view(&self) -> Option<&wgpu::TextureView> {

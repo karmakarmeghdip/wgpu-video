@@ -1,11 +1,11 @@
 use wgpu::{
-    BindGroupLayout, ColorTargetState, CommandEncoderDescriptor, Device, FilterMode,
-    FragmentState, FrontFace, LoadOp, MultisampleState, Operations,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-    Sampler, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource,
-    ShaderStages, StoreOp, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages, TextureView, TextureViewDimension, VertexState,
+    BindGroupLayout, ColorTargetState, CommandEncoderDescriptor, Device, FilterMode, FragmentState,
+    FrontFace, LoadOp, MultisampleState, Operations, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureView, TextureViewDimension, VertexState,
 };
 
 use crate::ImportedPlaneFrame;
@@ -159,7 +159,13 @@ impl VideoRenderer {
         }
     }
 
-    fn ensure_output_frame(&self, device: &Device, output: &mut Option<OutputFrame>, width: u32, height: u32) {
+    fn ensure_output_frame(
+        &self,
+        device: &Device,
+        output: &mut Option<OutputFrame>,
+        width: u32,
+        height: u32,
+    ) {
         let needs_recreate = output
             .as_ref()
             .map(|current| current.width != width || current.height != height)

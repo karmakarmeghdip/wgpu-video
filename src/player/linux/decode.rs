@@ -3,9 +3,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Context;
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{bounded, Receiver, Sender};
 
-use crate::demuxer::Demuxer;
+use crate::demuxer::{sample_presentation_end_timestamp, sample_presentation_timestamp, Demuxer};
 use crate::{PrimeDmabufFrame, VaapiBackend};
 
 use super::super::PlayerError;
@@ -27,7 +27,8 @@ pub(super) fn spawn_decode_thread(
     source: PathBuf,
     queue_size: usize,
 ) -> Result<(Receiver<DecodedFramePacket>, PlaybackTiming), PlayerError> {
-    let mut demuxer = Demuxer::new(&source).map_err(|err| PlayerError::DemuxError(format!("{err:#}")))?;
+    let mut demuxer =
+        Demuxer::new(&source).map_err(|err| PlayerError::DemuxError(format!("{err:#}")))?;
     let track_id = demuxer
         .find_h264_track()
         .map_err(|err| PlayerError::DemuxError(format!("{err:#}")))?;
@@ -53,7 +54,8 @@ fn decode_all_frames(
     let mut backend = VaapiBackend::new()?;
     backend.decode_h264_mp4_track_with_prime_frames(&mut demuxer, track_id, |frame| {
         let presentation_time = timestamp_delta_to_duration(
-            frame.metadata
+            frame
+                .metadata
                 .timestamp
                 .saturating_sub(playback_timing.first_timestamp),
             playback_timing.timescale,
@@ -82,7 +84,7 @@ fn analyze_track_timing(
         .map_err(|err| PlayerError::DemuxError(format!("{err:#}")))?;
     let mut previous_start_time = None;
     let mut first_start_time = None;
-    let mut last_start_time = None;
+    let mut last_presentation_end = None;
     let mut deltas = Vec::new();
 
     for sample_id in 1..=sample_count {
@@ -92,10 +94,11 @@ fn analyze_track_timing(
         let Some(sample) = sample else {
             continue;
         };
-        first_start_time.get_or_insert(sample.start_time);
-        last_start_time = Some(sample.start_time);
-        if let Some(previous) = previous_start_time.replace(sample.start_time) {
-            let delta = sample.start_time.saturating_sub(previous);
+        let presentation_time = sample_presentation_timestamp(&sample);
+        first_start_time.get_or_insert(presentation_time);
+        last_presentation_end = Some(sample_presentation_end_timestamp(&sample));
+        if let Some(previous) = previous_start_time.replace(presentation_time) {
+            let delta = presentation_time.saturating_sub(previous);
             if delta != 0 {
                 deltas.push(delta);
             }
@@ -110,13 +113,10 @@ fn analyze_track_timing(
         deltas[deltas.len() / 2]
     };
     let frame_interval = timestamp_delta_to_duration(nominal_delta, timescale);
-    let expected_duration = match last_start_time {
-        Some(last_start) => timestamp_delta_to_duration(
-            last_start
-                .saturating_sub(first_timestamp)
-                .saturating_add(nominal_delta),
-            timescale,
-        ),
+    let expected_duration = match last_presentation_end {
+        Some(last_end) => {
+            timestamp_delta_to_duration(last_end.saturating_sub(first_timestamp), timescale)
+        }
         None => frame_interval,
     };
 

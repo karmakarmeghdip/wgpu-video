@@ -19,3 +19,4 @@ codecs = { package = "cros-codecs", path = "third_party/cros-codecs", features =
 ash = "0.38.0"
 crossbeam-channel = "0.5.15"
 libloading = "0.8.9"
+iced = { git = "https://github.com/iced-rs/iced.git", features = ["wgpu", "tokio"] }

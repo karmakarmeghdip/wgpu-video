@@ -4,18 +4,18 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, anyhow, bail};
-use codecs::backend::vaapi::decoder::VaapiDecodedHandle;
+use anyhow::{anyhow, bail, Context};
 use codecs::backend::vaapi::decoder::VaapiBackend as CodecVaapiBackend;
+use codecs::backend::vaapi::decoder::VaapiDecodedHandle;
 use codecs::decoder::stateless::h264::H264;
 use codecs::decoder::stateless::{DecodeError, StatelessDecoder, StatelessVideoDecoder};
 use codecs::decoder::{DecodedHandle, DecoderEvent, StreamInfo};
-use codecs::video_frame::VideoFrame;
 use codecs::video_frame::frame_pool::{FramePool, PooledVideoFrame};
+use codecs::video_frame::VideoFrame;
 use codecs::{BlockingMode, Fourcc, Resolution};
 use libva::{Display, Surface, UsageHint};
 
-use crate::demuxer::{Demuxer, H264TrackConfig};
+use crate::demuxer::{sample_presentation_timestamp, Demuxer, H264TrackConfig};
 
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
@@ -176,13 +176,12 @@ impl VaapiBackend {
     pub fn new_with_render_node(render_node: &Path) -> anyhow::Result<Self> {
         let display = Display::open_drm_display(render_node)
             .with_context(|| format!("Failed to open VA display on {}", render_node.display()))?;
-        let decoder = StatelessDecoder::<H264, _>::new_vaapi(display.clone(), BlockingMode::Blocking)
-            .map_err(|err| anyhow!("Failed to create VA-API H.264 decoder: {err:?}"))?;
-        let framepool = FramePool::new(move |stream_info: &StreamInfo| {
-            NativeVaFrame {
-                coded_resolution: stream_info.coded_resolution,
-                display_resolution: stream_info.display_resolution,
-            }
+        let decoder =
+            StatelessDecoder::<H264, _>::new_vaapi(display.clone(), BlockingMode::Blocking)
+                .map_err(|err| anyhow!("Failed to create VA-API H.264 decoder: {err:?}"))?;
+        let framepool = FramePool::new(move |stream_info: &StreamInfo| NativeVaFrame {
+            coded_resolution: stream_info.coded_resolution,
+            display_resolution: stream_info.display_resolution,
         });
 
         Ok(Self {
@@ -213,14 +212,26 @@ impl VaapiBackend {
             let Some(sample) = demuxer.read_sample(track_id, sample_id)? else {
                 continue;
             };
-            let annex_b = sample_to_annex_b(&config, &sample.bytes, sample.is_sync, &mut self.parameter_sets_sent)
-                .with_context(|| format!("Failed to convert sample {sample_id} to Annex-B"))?;
-            self.decode_annex_b_packet(sample.start_time, &annex_b, export_frame_limit, &mut report)
-                .with_context(|| format!("Failed to decode sample {sample_id}"))?;
+            let annex_b = sample_to_annex_b(
+                &config,
+                &sample.bytes,
+                sample.is_sync,
+                &mut self.parameter_sets_sent,
+            )
+            .with_context(|| format!("Failed to convert sample {sample_id} to Annex-B"))?;
+            self.decode_annex_b_packet(
+                sample.start_time,
+                &annex_b,
+                export_frame_limit,
+                &mut report,
+            )
+            .with_context(|| format!("Failed to decode sample {sample_id}"))?;
             report.packets_decoded += 1;
         }
 
-        self.decoder.flush().map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
+        self.decoder
+            .flush()
+            .map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
         self.handle_decoder_events(export_frame_limit, &mut report)?;
 
         if report.frames_decoded == 0 {
@@ -261,7 +272,7 @@ impl VaapiBackend {
             )
             .with_context(|| format!("Failed to convert sample {sample_id} to Annex-B"))?;
             self.decode_annex_b_packet_with_callback(
-                sample.start_time,
+                sample_presentation_timestamp(&sample),
                 &annex_b,
                 &mut report,
                 &mut on_frame,
@@ -270,7 +281,9 @@ impl VaapiBackend {
             report.packets_decoded += 1;
         }
 
-        self.decoder.flush().map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
+        self.decoder
+            .flush()
+            .map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
         self.handle_decoder_events_with_callback(&mut report, &mut on_frame)?;
 
         if report.frames_decoded == 0 {
@@ -320,7 +333,9 @@ impl VaapiBackend {
             report.packets_decoded += 1;
         }
 
-        self.decoder.flush().map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
+        self.decoder
+            .flush()
+            .map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
         self.handle_decoder_events_with_cpu_callback(&mut report, &mut on_frame)?;
 
         if report.frames_decoded == 0 {
@@ -370,7 +385,9 @@ impl VaapiBackend {
             report.packets_decoded += 1;
         }
 
-        self.decoder.flush().map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
+        self.decoder
+            .flush()
+            .map_err(|err| anyhow!("Failed to flush decoder: {err:?}"))?;
         self.handle_decoder_events_with_rgba_callback(&mut report, &mut on_frame)?;
 
         if report.frames_decoded == 0 {
@@ -540,7 +557,8 @@ impl VaapiBackend {
                     self.handle_decoder_events_with_rgba_callback(report, on_frame)?;
                 }
                 Err(DecodeError::NotEnoughOutputBuffers(_)) => {
-                    let drained = self.handle_decoder_events_with_rgba_callback(report, on_frame)?;
+                    let drained =
+                        self.handle_decoder_events_with_rgba_callback(report, on_frame)?;
                     if drained == 0 {
                         bail!("Decoder ran out of output buffers and no frame became available")
                     }
@@ -562,15 +580,15 @@ impl VaapiBackend {
         while let Some(event) = self.decoder.next_event() {
             match event {
                 DecoderEvent::FormatChanged => {
-                    let stream_info = self
-                        .decoder
-                        .stream_info()
-                        .cloned()
-                        .ok_or(anyhow!("Decoder reported a format change without stream info"))?;
+                    let stream_info = self.decoder.stream_info().cloned().ok_or(anyhow!(
+                        "Decoder reported a format change without stream info"
+                    ))?;
                     self.framepool.resize(&stream_info);
                 }
                 DecoderEvent::FrameReady(handle) => {
-                    handle.sync().context("Failed to synchronize decoded frame")?;
+                    handle
+                        .sync()
+                        .context("Failed to synchronize decoded frame")?;
                     report.frames_decoded += 1;
                     if report.exported_frames.len() < export_frame_limit {
                         let summary = self.export_frame(&handle)?;
@@ -595,15 +613,15 @@ impl VaapiBackend {
         while let Some(event) = self.decoder.next_event() {
             match event {
                 DecoderEvent::FormatChanged => {
-                    let stream_info = self
-                        .decoder
-                        .stream_info()
-                        .cloned()
-                        .ok_or(anyhow!("Decoder reported a format change without stream info"))?;
+                    let stream_info = self.decoder.stream_info().cloned().ok_or(anyhow!(
+                        "Decoder reported a format change without stream info"
+                    ))?;
                     self.framepool.resize(&stream_info);
                 }
                 DecoderEvent::FrameReady(handle) => {
-                    handle.sync().context("Failed to synchronize decoded frame")?;
+                    handle
+                        .sync()
+                        .context("Failed to synchronize decoded frame")?;
                     report.frames_decoded += 1;
                     let prime_frame = self.export_prime_frame(&handle)?;
                     on_frame(prime_frame)?;
@@ -626,15 +644,15 @@ impl VaapiBackend {
         while let Some(event) = self.decoder.next_event() {
             match event {
                 DecoderEvent::FormatChanged => {
-                    let stream_info = self
-                        .decoder
-                        .stream_info()
-                        .cloned()
-                        .ok_or(anyhow!("Decoder reported a format change without stream info"))?;
+                    let stream_info = self.decoder.stream_info().cloned().ok_or(anyhow!(
+                        "Decoder reported a format change without stream info"
+                    ))?;
                     self.framepool.resize(&stream_info);
                 }
                 DecoderEvent::FrameReady(handle) => {
-                    handle.sync().context("Failed to synchronize decoded frame")?;
+                    handle
+                        .sync()
+                        .context("Failed to synchronize decoded frame")?;
                     report.frames_decoded += 1;
                     let cpu_frame = self.export_cpu_frame(&handle)?;
                     on_frame(cpu_frame)?;
@@ -657,15 +675,15 @@ impl VaapiBackend {
         while let Some(event) = self.decoder.next_event() {
             match event {
                 DecoderEvent::FormatChanged => {
-                    let stream_info = self
-                        .decoder
-                        .stream_info()
-                        .cloned()
-                        .ok_or(anyhow!("Decoder reported a format change without stream info"))?;
+                    let stream_info = self.decoder.stream_info().cloned().ok_or(anyhow!(
+                        "Decoder reported a format change without stream info"
+                    ))?;
                     self.framepool.resize(&stream_info);
                 }
                 DecoderEvent::FrameReady(handle) => {
-                    handle.sync().context("Failed to synchronize decoded frame")?;
+                    handle
+                        .sync()
+                        .context("Failed to synchronize decoded frame")?;
                     report.frames_decoded += 1;
                     let rgba_frame = self.export_rgba_frame(&handle)?;
                     on_frame(rgba_frame)?;
@@ -693,12 +711,19 @@ impl VaapiBackend {
                     .map(|plane| plane.iter().copied().take(16).collect())
             })
             .unwrap_or_default();
-        let va_surface = frame.to_native_handle(&self.display).map_err(|err| anyhow!(err))?;
-        let descriptor = va_surface.export_prime().context("Failed to export VA surface as PRIME")?;
+        let va_surface = frame
+            .to_native_handle(&self.display)
+            .map_err(|err| anyhow!(err))?;
+        let descriptor = va_surface
+            .export_prime()
+            .context("Failed to export VA surface as PRIME")?;
 
         Ok(ExportedDmabufFrame {
             timestamp: handle.timestamp(),
-            coded_resolution: (handle.coded_resolution().width, handle.coded_resolution().height),
+            coded_resolution: (
+                handle.coded_resolution().width,
+                handle.coded_resolution().height,
+            ),
             display_resolution: (
                 handle.display_resolution().width,
                 handle.display_resolution().height,
@@ -732,15 +757,23 @@ impl VaapiBackend {
         })
     }
 
-    fn export_prime_frame(&self, handle: &Rc<RefCell<VaapiDecodedHandle<DecoderFrame>>>) -> anyhow::Result<PrimeDmabufFrame> {
+    fn export_prime_frame(
+        &self,
+        handle: &Rc<RefCell<VaapiDecodedHandle<DecoderFrame>>>,
+    ) -> anyhow::Result<PrimeDmabufFrame> {
         let handle_ref = handle.borrow();
         let va_surface = handle_ref.surface();
-        let descriptor = va_surface.export_prime().context("Failed to export VA surface as PRIME")?;
+        let descriptor = va_surface
+            .export_prime()
+            .context("Failed to export VA surface as PRIME")?;
 
         Ok(PrimeDmabufFrame {
             metadata: PrimeFrameMetadata {
                 timestamp: handle.timestamp(),
-                coded_resolution: (handle.coded_resolution().width, handle.coded_resolution().height),
+                coded_resolution: (
+                    handle.coded_resolution().width,
+                    handle.coded_resolution().height,
+                ),
                 display_resolution: (
                     handle.display_resolution().width,
                     handle.display_resolution().height,
@@ -750,7 +783,10 @@ impl VaapiBackend {
         })
     }
 
-    fn export_cpu_frame(&self, handle: &Rc<RefCell<VaapiDecodedHandle<DecoderFrame>>>) -> anyhow::Result<CpuNv12Frame> {
+    fn export_cpu_frame(
+        &self,
+        handle: &Rc<RefCell<VaapiDecodedHandle<DecoderFrame>>>,
+    ) -> anyhow::Result<CpuNv12Frame> {
         fn copy_nv12_image(
             image: &libva::Image<'_>,
             metadata: PrimeFrameMetadata,
@@ -799,8 +835,8 @@ impl VaapiBackend {
         let metadata = PrimeFrameMetadata {
             timestamp: handle.timestamp(),
             coded_resolution: (
-            handle.coded_resolution().width,
-            handle.coded_resolution().height,
+                handle.coded_resolution().width,
+                handle.coded_resolution().height,
             ),
             display_resolution,
         };
@@ -829,7 +865,10 @@ impl VaapiBackend {
         copy_nv12_image(&image, metadata)
     }
 
-    fn export_rgba_frame(&mut self, handle: &Rc<RefCell<VaapiDecodedHandle<DecoderFrame>>>) -> anyhow::Result<CpuRgbaFrame> {
+    fn export_rgba_frame(
+        &mut self,
+        handle: &Rc<RefCell<VaapiDecodedHandle<DecoderFrame>>>,
+    ) -> anyhow::Result<CpuRgbaFrame> {
         let handle_ref = handle.borrow();
         let va_surface = handle_ref.surface();
         let metadata = PrimeFrameMetadata {
@@ -869,7 +908,9 @@ impl VaapiBackend {
                     None
                 }
             })
-            .ok_or_else(|| anyhow!("VA driver does not expose a supported 32-bit RGBA/BGRA image format"))?;
+            .ok_or_else(|| {
+                anyhow!("VA driver does not expose a supported 32-bit RGBA/BGRA image format")
+            })?;
 
         let rgba = {
             let image = libva::Image::create_from(
@@ -907,7 +948,10 @@ impl VaapiBackend {
                 format,
                 &rgba,
             ) {
-                eprintln!("failed to dump first RGBA frame to {}: {err:#}", dump_path.display());
+                eprintln!(
+                    "failed to dump first RGBA frame to {}: {err:#}",
+                    dump_path.display()
+                );
             } else {
                 eprintln!("wrote first RGBA frame dump to {}", dump_path.display());
             }
@@ -980,7 +1024,10 @@ fn sample_to_annex_b(
 
     if !*parameter_sets_sent || is_sync {
         let mut with_headers = Vec::with_capacity(
-            annex_b.len() + config.sequence_parameter_set.len() + config.picture_parameter_set.len() + 8,
+            annex_b.len()
+                + config.sequence_parameter_set.len()
+                + config.picture_parameter_set.len()
+                + 8,
         );
         push_annex_b_nal(&mut with_headers, &config.sequence_parameter_set);
         push_annex_b_nal(&mut with_headers, &config.picture_parameter_set);
@@ -999,7 +1046,9 @@ fn convert_avcc_packet(packet: &[u8]) -> anyhow::Result<Vec<u8>> {
         }
     }
 
-    Err(anyhow!("Unsupported AVC sample layout; failed to infer NAL length prefix size"))
+    Err(anyhow!(
+        "Unsupported AVC sample layout; failed to infer NAL length prefix size"
+    ))
 }
 
 fn try_convert_avcc_packet(packet: &[u8], length_size: usize) -> Option<Vec<u8>> {

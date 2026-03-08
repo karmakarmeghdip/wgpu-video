@@ -2,6 +2,16 @@ use std::{fs::File, io::BufReader};
 
 use anyhow::anyhow;
 
+pub(crate) fn sample_presentation_timestamp(sample: &mp4::Mp4Sample) -> u64 {
+    sample
+        .start_time
+        .saturating_add_signed(i64::from(sample.rendering_offset))
+}
+
+pub(crate) fn sample_presentation_end_timestamp(sample: &mp4::Mp4Sample) -> u64 {
+    sample_presentation_timestamp(sample).saturating_add(u64::from(sample.duration))
+}
+
 #[derive(Clone, Debug)]
 pub struct H264TrackConfig {
     pub track_id: u32,
