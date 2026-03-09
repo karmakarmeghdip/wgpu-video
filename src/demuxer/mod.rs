@@ -1,4 +1,6 @@
 mod codec_config;
+#[cfg(feature = "libavformat")]
+mod ffmpeg;
 mod matroska;
 mod mp4;
 mod types;
@@ -7,13 +9,17 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail};
 
+#[cfg(feature = "libavformat")]
+use ffmpeg::FfmpegDemuxer;
 use matroska::MatroskaDemuxer;
 use mp4::Mp4Demuxer;
 
-pub use types::{H264TrackConfig, H265TrackConfig, VideoCodec, VideoSample, VideoTrackConfig};
 pub(crate) use types::{sample_presentation_end_timestamp, sample_presentation_timestamp};
+pub use types::{H264TrackConfig, H265TrackConfig, VideoCodec, VideoSample, VideoTrackConfig};
 
 enum DemuxerInner {
+    #[cfg(feature = "libavformat")]
+    Ffmpeg(FfmpegDemuxer),
     Mp4(Mp4Demuxer),
     Matroska(MatroskaDemuxer),
 }
@@ -29,17 +35,97 @@ impl Demuxer {
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase());
 
+        #[cfg(feature = "libavformat")]
+        {
+            let ffmpeg_err = match Self::open_ffmpeg(file_path) {
+                Ok(demuxer) => {
+                    log_demuxer_selection(file_path, "ffmpeg/libavformat");
+                    return Ok(demuxer);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "demuxer: ffmpeg/libavformat failed for {}: {err:#}",
+                        file_path.display()
+                    );
+                    err
+                }
+            };
+
+            let fallback = match extension.as_deref() {
+                Some("mkv") | Some("webm") => match Self::open_matroska(file_path) {
+                    Ok(demuxer) => {
+                        log_demuxer_selection(file_path, "matroska-demuxer fallback");
+                        Ok(demuxer)
+                    }
+                    Err(matroska_err) => match Self::open_mp4(file_path) {
+                        Ok(demuxer) => {
+                            log_demuxer_selection(file_path, "mp4 fallback");
+                            Ok(demuxer)
+                        }
+                        Err(_) => Err(matroska_err),
+                    },
+                },
+                _ => match Self::open_mp4(file_path) {
+                    Ok(demuxer) => {
+                        log_demuxer_selection(file_path, "mp4 fallback");
+                        Ok(demuxer)
+                    }
+                    Err(mp4_err) => match Self::open_matroska(file_path) {
+                        Ok(demuxer) => {
+                            log_demuxer_selection(file_path, "matroska-demuxer fallback");
+                            Ok(demuxer)
+                        }
+                        Err(_) => Err(mp4_err),
+                    },
+                },
+            };
+
+            return fallback.map_err(|fallback_err| {
+                fallback_err.context(format!("FFmpeg demuxer also failed: {ffmpeg_err:#}"))
+            });
+        }
+
+        #[cfg(not(feature = "libavformat"))]
         match extension.as_deref() {
-            Some("mkv") | Some("webm") => Self::open_matroska(file_path)
-                .or_else(|matroska_err| Self::open_mp4(file_path).map_err(|_| matroska_err)),
-            _ => Self::open_mp4(file_path)
-                .or_else(|mp4_err| Self::open_matroska(file_path).map_err(|_| mp4_err)),
+            Some("mkv") | Some("webm") => match Self::open_matroska(file_path) {
+                Ok(demuxer) => {
+                    log_demuxer_selection(file_path, "matroska-demuxer");
+                    Ok(demuxer)
+                }
+                Err(matroska_err) => match Self::open_mp4(file_path) {
+                    Ok(demuxer) => {
+                        log_demuxer_selection(file_path, "mp4");
+                        Ok(demuxer)
+                    }
+                    Err(_) => Err(matroska_err),
+                },
+            },
+            _ => match Self::open_mp4(file_path) {
+                Ok(demuxer) => {
+                    log_demuxer_selection(file_path, "mp4");
+                    Ok(demuxer)
+                }
+                Err(mp4_err) => match Self::open_matroska(file_path) {
+                    Ok(demuxer) => {
+                        log_demuxer_selection(file_path, "matroska-demuxer");
+                        Ok(demuxer)
+                    }
+                    Err(_) => Err(mp4_err),
+                },
+            },
         }
     }
 
     fn open_mp4(file_path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             inner: DemuxerInner::Mp4(Mp4Demuxer::open(file_path)?),
+        })
+    }
+
+    #[cfg(feature = "libavformat")]
+    fn open_ffmpeg(file_path: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: DemuxerInner::Ffmpeg(FfmpegDemuxer::open(file_path)?),
         })
     }
 
@@ -51,6 +137,8 @@ impl Demuxer {
 
     pub fn get_tracks(&mut self) -> Vec<u32> {
         match &mut self.inner {
+            #[cfg(feature = "libavformat")]
+            DemuxerInner::Ffmpeg(demuxer) => demuxer.track_ids(),
             DemuxerInner::Mp4(demuxer) => demuxer.track_ids(),
             DemuxerInner::Matroska(demuxer) => demuxer.track_ids(),
         }
@@ -62,6 +150,8 @@ impl Demuxer {
 
     pub fn get_track_config(&mut self, track_id: u32) -> anyhow::Result<VideoTrackConfig> {
         match &mut self.inner {
+            #[cfg(feature = "libavformat")]
+            DemuxerInner::Ffmpeg(demuxer) => demuxer.track_config(track_id),
             DemuxerInner::Mp4(demuxer) => demuxer.track_config(track_id),
             DemuxerInner::Matroska(demuxer) => demuxer.track_config(track_id),
         }
@@ -105,6 +195,8 @@ impl Demuxer {
 
     pub fn sample_count(&mut self, track_id: u32) -> anyhow::Result<u32> {
         match &mut self.inner {
+            #[cfg(feature = "libavformat")]
+            DemuxerInner::Ffmpeg(demuxer) => demuxer.sample_count(track_id),
             DemuxerInner::Mp4(demuxer) => demuxer.sample_count(track_id),
             DemuxerInner::Matroska(demuxer) => demuxer.sample_count(track_id),
         }
@@ -116,6 +208,8 @@ impl Demuxer {
         sample_id: u32,
     ) -> anyhow::Result<Option<VideoSample>> {
         match &mut self.inner {
+            #[cfg(feature = "libavformat")]
+            DemuxerInner::Ffmpeg(demuxer) => demuxer.read_sample(track_id, sample_id),
             DemuxerInner::Mp4(demuxer) => demuxer.read_sample(track_id, sample_id),
             DemuxerInner::Matroska(demuxer) => demuxer.read_sample(track_id, sample_id),
         }
@@ -136,8 +230,14 @@ impl Demuxer {
 
     pub fn print_debug_info(&mut self) -> anyhow::Result<()> {
         match &mut self.inner {
+            #[cfg(feature = "libavformat")]
+            DemuxerInner::Ffmpeg(demuxer) => demuxer.print_debug_info(),
             DemuxerInner::Mp4(demuxer) => demuxer.print_debug_info(),
             DemuxerInner::Matroska(demuxer) => demuxer.print_debug_info(),
         }
     }
+}
+
+fn log_demuxer_selection(file_path: &Path, demuxer_name: &str) {
+    eprintln!("demuxer: using {demuxer_name} for {}", file_path.display());
 }

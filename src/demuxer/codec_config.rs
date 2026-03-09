@@ -1,4 +1,4 @@
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 
 use super::{H264TrackConfig, H265TrackConfig, VideoCodec};
 
@@ -14,6 +14,20 @@ pub(super) fn codec_from_mp4_fourcc(fourcc: mp4::FourCC) -> anyhow::Result<Video
         value if value == mp4::FourCC::from(*b"vp09") => Ok(VideoCodec::Vp9),
         value if value == mp4::FourCC::from(*b"av01") => Ok(VideoCodec::Av1),
         _ => bail!("Unsupported codec {}", fourcc),
+    }
+}
+
+#[cfg(feature = "libavformat")]
+pub(super) fn codec_from_ffmpeg_id(codec_id: ffmpeg_the_third::codec::Id) -> Option<VideoCodec> {
+    match codec_id {
+        ffmpeg_the_third::codec::Id::H264 => Some(VideoCodec::H264),
+        ffmpeg_the_third::codec::Id::HEVC | ffmpeg_the_third::codec::Id::H265 => {
+            Some(VideoCodec::H265)
+        }
+        ffmpeg_the_third::codec::Id::VP8 => Some(VideoCodec::Vp8),
+        ffmpeg_the_third::codec::Id::VP9 => Some(VideoCodec::Vp9),
+        ffmpeg_the_third::codec::Id::AV1 => Some(VideoCodec::Av1),
+        _ => None,
     }
 }
 

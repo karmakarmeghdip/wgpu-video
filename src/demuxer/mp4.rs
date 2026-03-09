@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 
 use super::codec_config::{codec_from_mp4_fourcc, parse_hevc_decoder_configuration_record};
 use super::{H264TrackConfig, H265TrackConfig, VideoCodec, VideoSample, VideoTrackConfig};
@@ -66,18 +66,14 @@ impl Mp4Demuxer {
                     width: track.width(),
                     height: track.height(),
                     timescale: track.timescale(),
-                    sequence_parameter_sets: vec![
-                        track
-                            .sequence_parameter_set()
-                            .map_err(|_| anyhow!("Missing H.264 SPS for track {track_id}"))?
-                            .to_vec(),
-                    ],
-                    picture_parameter_sets: vec![
-                        track
-                            .picture_parameter_set()
-                            .map_err(|_| anyhow!("Missing H.264 PPS for track {track_id}"))?
-                            .to_vec(),
-                    ],
+                    sequence_parameter_sets: vec![track
+                        .sequence_parameter_set()
+                        .map_err(|_| anyhow!("Missing H.264 SPS for track {track_id}"))?
+                        .to_vec()],
+                    picture_parameter_sets: vec![track
+                        .picture_parameter_set()
+                        .map_err(|_| anyhow!("Missing H.264 PPS for track {track_id}"))?
+                        .to_vec()],
                     nal_length_size: 4,
                 }),
                 _ => None,

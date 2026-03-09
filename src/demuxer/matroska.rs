@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use matroska_demuxer::{Frame as MatroskaFrame, MatroskaFile, TrackType};
 
 use super::codec_config::{
